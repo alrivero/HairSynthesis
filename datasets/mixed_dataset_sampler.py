@@ -23,7 +23,7 @@ class MixedDatasetBatchSampler(torch.utils.data.Sampler):
         #print(self.per_batch)
         
         self.n_samples = n_samples
-        self.n_batches = n_samples // batch_size
+        self.n_batches = n_samples // batch_size    # TODO: some data will not be used, should have last batch with < batch_size sample
 
     def __iter__(self):
         

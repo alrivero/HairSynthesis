@@ -179,3 +179,66 @@ def mesh_based_mask_uniform_faces(flame_trans_verts, flame_faces, face_probabili
     #mask[torch.arange(batch_size).unsqueeze(-1), :, npoints[..., 1], npoints[..., 0]] = 1        
 
     return npoints, {'sampled_faces_indices':sampled_faces_indices, 'barycentric_coords':barycentric_coords}
+
+
+def mask_uniform_hair(hair_mask, mask_ratio=0.1, IMAGE_SIZE=224):
+    """
+    Samples points from the hair based on the mask ratio.
+
+    hair_mask: (B, 1, H, W)
+    """
+    batch_size = hair_mask.size(0)
+    device = hair_mask.device
+
+    # if mask_ratio is single value, then use it as a ratio of the image size
+    num_points_to_sample = int(mask_ratio * IMAGE_SIZE * IMAGE_SIZE)
+
+    # sampling per image in the batch
+    samples = []
+    for b in range(batch_size):
+        mask_b = hair_mask[b, 0]    # H, W
+
+        # print("hair_mask", hair_mask.shape)
+        # print((torch.where(hair_mask > 0)).shape)
+        ys, xs = torch.where(mask_b > 0)
+        idx = torch.randint(0, len(xs), (num_points_to_sample,), device=device)
+
+        sample_b = torch.stack([xs[idx], ys[idx]], dim=1).unsqueeze(0)      # (1, N, 2)
+        samples.append(sample_b)
+
+    # if coords is None:
+    #     # calculate face normals
+    #     transformed_normals = vertex_normals(flame_trans_verts, flame_faces_expanded) 
+    #     transformed_face_normals = face_vertices(transformed_normals, flame_faces_expanded)
+    #     transformed_face_normals = transformed_face_normals[:,:,:,2].mean(dim=-1)
+    #     face_probabilities = face_probabilities.repeat(batch_size,1).to(flame_trans_verts.device)
+
+    #     # # where the face normals are negative, set probability to 0
+    #     face_probabilities = torch.where(transformed_face_normals < 0.05, face_probabilities, torch.zeros_like(transformed_face_normals).to(DEVICE))
+    #     # face_probabilities = torch.where(transformed_face_normals > 0, torch.ones_like(transformed_face_normals).to(flame_trans_verts.device), face_probabilities)
+
+    #     # calculate xy area of faces and scale the probabilities by it
+    #     fv = face_vertices(flame_trans_verts, flame_faces_expanded)
+    #     xy_area = triangle_area(fv)
+
+    #     face_probabilities = face_probabilities * xy_area
+
+
+    #     sampled_faces_indices = torch.multinomial(face_probabilities, num_points_to_sample, replacement=True).to(DEVICE)
+
+    #     barycentric_coords = random_barycentric(num=batch_size*num_points_to_sample).to(DEVICE)
+    #     barycentric_coords = barycentric_coords.view(batch_size, num_points_to_sample, 3)
+    # else:
+    #     sampled_faces_indices = coords['sampled_faces_indices']
+    #     barycentric_coords = coords['barycentric_coords']
+
+    # npoints = vertices2landmarks(flame_trans_verts, flame_faces, sampled_faces_indices, barycentric_coords)
+
+    # npoints = .5 * (1 + npoints) * IMAGE_SIZE
+    # npoints = npoints.long()
+    # npoints[...,1] = torch.clamp(npoints[..., 1], 0, IMAGE_SIZE-1)
+    # npoints[...,0] = torch.clamp(npoints[..., 0], 0, IMAGE_SIZE-1)
+     
+    # return npoints, {'sampled_faces_indices':sampled_faces_indices, 'barycentric_coords':barycentric_coords}
+
+    return torch.cat(samples, dim=0)    # (B, N, 2)

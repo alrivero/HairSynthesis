@@ -213,3 +213,63 @@ class BaseDataset(torch.utils.data.Dataset):
 
 
         return data_dict
+
+
+class BaseHairDataset(BaseDataset):
+    def __init__(self, data_list, config, test=False):
+        self.data_list = data_list
+        self.config = config
+        self.image_size = config.image_size
+        self.test = test
+
+        if not self.test:
+            self.scale = [config.train.train_scale_min, config.train.train_scale_max] 
+        else:
+            self.scale = config.train.test_scale
+        
+        self.transform = A.Compose([
+                # color ones
+                A.RandomBrightnessContrast(p=0.5),
+                A.RandomGamma(p=0.5),
+                A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
+                A.CLAHE(p=0.255),
+                A.RGBShift(p=0.25),
+                A.Blur(p=0.1),
+                A.GaussNoise(p=0.5),
+                # affine ones
+                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, border_mode=0, p=0.9),
+            ], additional_targets={'hair_mask': 'mask', 'body_mask': 'mask'})
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, index):
+        data_dict = self.__getitem_aux__(index)
+        return data_dict
+
+    def prepare_data(self, image, hairmask, bodymask):
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # augment
+        if not self.test:
+            transformed = self.transform(image=image, hairmask=hairmask, bodymask=bodymask)
+
+            image = (transformed['image']/255.0).astype(np.float32)
+            hairmask = transformed['hairmask'].astype(np.float32)
+            bodymask = transformed['bodymask'].astype(np.float32)
+        else: 
+            image = (image/255.0).astype(np.float32)
+            hairmask = hairmask.astype(np.float32)
+            bodymask = bodymask.astype(np.float32)
+        
+        image = image.transpose(2,0,1)
+        hairmask = hairmask.transpose(2,0,1)
+        bodymask = bodymask.transpose(2,0,1)
+
+        data_dict = {
+            'img': image,
+            'hairmask': hairmask,
+            'bodymask': bodymask
+        }
+        return data_dict
+    

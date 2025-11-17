@@ -1,56 +1,93 @@
 import os
 import numpy as np
-from datasets.base_dataset import BaseDataset
+from datasets.base_dataset import BaseDataset, BaseHairDataset
 import cv2
 import numpy as np
+import json
+from collections import defaultdict
+import imageio
 
 
-class FFHQDataset(BaseDataset):
+class FFHQDataset(BaseHairDataset):
     def __init__(self, data_list, config, test=False):
         super().__init__(data_list, config, test)
         self.name = 'FFHQ'
-        
 
     def __getitem_aux__(self, index):
         image = cv2.imread(self.data_list[index][0])
 
         # check if paths exist
-        if not os.path.exists(self.data_list[index][2]):
-            print('Mediapipe landmarks not found for %s'%(self.data_list[index]))
-            return None
-        
         if not os.path.exists(self.data_list[index][1]):
-            print('Fan landmarks not found for %s'%(self.data_list[index]))
+            print('Hairmask not found for %s'%(self.data_list[index]))
+            return None
+        if not os.path.exists(self.data_list[index][2]):
+            print('Bodymask not found for %s'%(self.data_list[index]))
             return None
 
-
-        landmarks_fan = np.load(self.data_list[index][1], allow_pickle=True)
-        if landmarks_fan is None or landmarks_fan.size == 1:
-            return None
+        # hairmask = cv2.imread(self.data_list[index][1], cv2.IMREAD_GRAYSCALE)
+        # bodymask = cv2.imread(self.data_list[index][2], cv2.IMREAD_GRAYSCALE)
+        hairmask = (imageio.imread(self.data_list[index][1])/255.>0.5)[:,:,None]
+        bodymask = ((imageio.imread(self.data_list[index][2])[:,:,0]/255.>0.5)[:,:,None])*(1-hairmask)
+        # landmarks_fan = np.load(self.data_list[index][1], allow_pickle=True)
+        # if landmarks_fan is None or landmarks_fan.size == 1:
+        #     return None
         
-        landmarks_fan = landmarks_fan[0] # first found face
+        # landmarks_fan = landmarks_fan[0] # first found face
         
-        landmarks_mediapipe = np.load(self.data_list[index][2], allow_pickle=True)
+        # landmarks_mediapipe = np.load(self.data_list[index][2], allow_pickle=True)
 
-        data_dict = self.prepare_data(image=image, landmarks_fan=landmarks_fan, landmarks_mediapipe=landmarks_mediapipe)
+        data_dict = self.prepare_data(image=image, hairmask=hairmask, bodymask=bodymask)
         
         return data_dict
 
 
-    
 def get_datasets_FFHQ(config):
-    train_list = []
+    from sklearn.model_selection import train_test_split
+    import os.path as osp
 
-    for image in os.listdir(config.dataset.FFHQ_path):
-        if image.endswith(".png"):
-            image_path = os.path.join(config.dataset.FFHQ_path, image)
-            fan_landmarks_path = os.path.join(config.dataset.FFHQ_fan_landmarks_path, image.split(".")[0] + ".npy")
-            mediapipe_landmarks_path = os.path.join(config.dataset.FFHQ_mediapipe_landmarks_path, image.split(".")[0] + ".npy")
+    # Read train and validation list
+    # {'training': <list of train images>, 'validation': <list of val images>}
+    with open(config.dataset.FFHQ_meta_path, 'r') as f:
+        meta = json.load(f)
+    categories = defaultdict(list)
+    for v in meta.values():
+        category = v['category']
+        file_path = v['image']['file_path'].split('/')[-1]
 
-            train_list.append([image_path, fan_landmarks_path, mediapipe_landmarks_path])
+        categories[category].append(file_path)
+    categories = dict(categories)
 
-    dataset = FFHQDataset(train_list, config, test=False)
+    train_idx, val_idx = train_test_split(categories['training'], test_size=0.2, random_state=42)
+    test_idx = categories['validation']
+
+    train_list = [
+        [osp.join(config.dataset.FFHQ_path, i),
+        osp.join(config.dataset.FFHQ_hairmask, i),
+        osp.join(config.dataset.FFHQ_bodymask, i)]
+        for i in sorted(train_idx)
+    ]
+    val_list = [
+        [osp.join(config.dataset.FFHQ_path, i),
+        osp.join(config.dataset.FFHQ_hairmask, i),
+        osp.join(config.dataset.FFHQ_bodymask, i)]
+        for i in sorted(val_idx)
+    ]
+    test_list = [
+        [osp.join(config.dataset.FFHQ_path, i),
+        osp.join(config.dataset.FFHQ_hairmask, i),
+        osp.join(config.dataset.FFHQ_bodymask, i)]
+        for i in sorted(test_idx)
+    ]
+    
+    if config.dataset.FFHQ_percentage_subset != 1:
+        subset_perc = config.dataset.FFHQ_percentage_subset
+        train_list = train_list[:int(len(train_list)*subset_perc)]
+        val_list = train_list[:int(len(val_list)*subset_perc)]
+        test_list = train_list[:int(len(test_list)*subset_perc)]
+
+    dataset = FFHQDataset(train_list, config), FFHQDataset(val_list, config, test=True), FFHQDataset(test_list, config, test=True)
     return dataset
+
 
 
 
