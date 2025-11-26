@@ -10,3 +10,8 @@ assets/LRS3_lists.pkl
 assets/MEAD_lists.pkl
 .vscode
 __pycache__/
+
+
+results/
+samples/
+*.png
