@@ -1,11 +1,12 @@
 import os
 import numpy as np
-from datasets.base_dataset import BaseDataset, BaseHairDataset
+from datasets.base_dataset import BaseHairDataset
 import cv2
 import numpy as np
 import json
 from collections import defaultdict
 import imageio
+from pathlib import Path
 
 
 class FFHQDataset(BaseHairDataset):
@@ -28,13 +29,6 @@ class FFHQDataset(BaseHairDataset):
         # bodymask = cv2.imread(self.data_list[index][2], cv2.IMREAD_GRAYSCALE)
         hairmask = (imageio.imread(self.data_list[index][1])/255.>0.5)[:,:,None]
         bodymask = ((imageio.imread(self.data_list[index][2])[:,:,0]/255.>0.5)[:,:,None])*(1-hairmask)
-        # landmarks_fan = np.load(self.data_list[index][1], allow_pickle=True)
-        # if landmarks_fan is None or landmarks_fan.size == 1:
-        #     return None
-        
-        # landmarks_fan = landmarks_fan[0] # first found face
-        
-        # landmarks_mediapipe = np.load(self.data_list[index][2], allow_pickle=True)
 
         data_dict = self.prepare_data(image=image, hairmask=hairmask, bodymask=bodymask)
         
@@ -57,8 +51,21 @@ def get_datasets_FFHQ(config):
         categories[category].append(file_path)
     categories = dict(categories)
 
-    train_idx, val_idx = train_test_split(categories['training'], test_size=0.2, random_state=42)
+    train_idx, val_idx = train_test_split(categories['training'], test_size=0.2, random_state=1234)
     test_idx = categories['validation']
+
+    if config.dataset.FFHQ_percentage_subset != 1:
+        subset_perc = config.dataset.FFHQ_percentage_subset
+        train_idx = train_idx[:int(len(train_idx)*subset_perc)]
+        val_idx = val_idx[:int(len(val_idx)*subset_perc)]
+        test_idx = test_idx[:int(len(test_idx)*subset_perc)]
+
+    split_dir = Path(config.train.log_path)
+    final_splits = {'training': train_idx, 'validation': val_idx, 'test': test_idx}
+    split_json = split_dir/'splits.json'
+    assert not split_json.exists(), f"{split_json} existed"
+    with open(split_json, 'w') as f:
+        json.dump(final_splits, f, indent=4)
 
     train_list = [
         [osp.join(config.dataset.FFHQ_path, i),
@@ -78,13 +85,7 @@ def get_datasets_FFHQ(config):
         osp.join(config.dataset.FFHQ_bodymask, i)]
         for i in sorted(test_idx)
     ]
-    
-    if config.dataset.FFHQ_percentage_subset != 1:
-        subset_perc = config.dataset.FFHQ_percentage_subset
-        train_list = train_list[:int(len(train_list)*subset_perc)]
-        val_list = train_list[:int(len(val_list)*subset_perc)]
-        test_list = train_list[:int(len(test_list)*subset_perc)]
-
+        
     dataset = FFHQDataset(train_list, config), FFHQDataset(val_list, config, test=True), FFHQDataset(test_list, config, test=True)
     return dataset
 
