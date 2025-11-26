@@ -1,7 +1,7 @@
 resume:
 load_encoder: True
 load_fuse_generator: True
-device: cuda:2
+device: cuda:3
 image_size: 224
 K: 1 # temporal sequence length - no temporal data used here
 deterministic: False
@@ -23,9 +23,9 @@ train:
   # samples_per_epoch: 50000   TODO: if using multiple datasets, need to change this
   use_base_model_for_regularization: True  # use the base model for regularization - when False the regularization is wrt zero
   resume_epoch: 0
-  train_scale_min: 1.2  # min scale for data augmentation during training
-  train_scale_max: 1.8 # max scale for data augmentation during training
-  test_scale: 1.6 # fixed scale for testing
+  # train_scale_min: 1.2  # min scale for data augmentation during training
+  # train_scale_max: 1.8 # max scale for data augmentation during training
+  # test_scale: 1.6 # fixed scale for testing
 
   loss_weights:
     # landmark_loss: 100.0   # landmark loss weight
@@ -97,4 +97,4 @@ dataset:
   # sample_full_video_for_testing: False
 
   # using subset of the dataset only - for debugging
-  FFHQ_percentage_subset: 0.1 # 0.001 # 0.01
+  FFHQ_percentage_subset: 0.01 # 0.001 # 0.01
