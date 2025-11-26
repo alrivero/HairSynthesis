@@ -222,22 +222,22 @@ class BaseHairDataset(BaseDataset):
         self.image_size = config.image_size
         self.test = test
 
-        if not self.test:
-            self.scale = [config.train.train_scale_min, config.train.train_scale_max] 
-        else:
-            self.scale = config.train.test_scale
+        # if not self.test:
+        #     self.scale = [config.train.train_scale_min, config.train.train_scale_max] 
+        # else:
+        #     self.scale = config.train.test_scale
         
         self.transform = A.Compose([
-                # color ones
-                A.RandomBrightnessContrast(p=0.5),
-                A.RandomGamma(p=0.5),
-                A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
-                A.CLAHE(p=0.255),
-                A.RGBShift(p=0.25),
-                A.Blur(p=0.1),
-                A.GaussNoise(p=0.5),
-                # affine ones
-                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, border_mode=0, p=0.9),
+                # # color ones
+                # A.RandomBrightnessContrast(p=0.5),
+                # A.RandomGamma(p=0.5),
+                # A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
+                # A.CLAHE(p=0.255),
+                # A.RGBShift(p=0.25),
+                # A.Blur(p=0.1),
+                # A.GaussNoise(p=0.5),
+                # # affine ones
+                # A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, border_mode=0, p=0.9),
             ], additional_targets={'hair_mask': 'mask', 'body_mask': 'mask'})
 
     def __len__(self):
