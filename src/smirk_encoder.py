@@ -145,8 +145,8 @@ class HairStepEncoder(nn.Module):
     """Using Hairstep encoder"""
     
     def __init__(self,
-                 img2strand_ckpt,
-                 img2depth_ckpt,
+                 img2strand_ckpt=None,
+                 img2depth_ckpt=None,
                  ) -> None:
         super().__init__()
         
@@ -154,16 +154,16 @@ class HairStepEncoder(nn.Module):
 
         # HairStep UNet strand model
         self.strand_encoder = StrandModel()
-        self.strand_encoder.load_state_dict(torch.load(img2strand_ckpt))
-        # self.strand_encoder.eval()
+        if img2strand_ckpt is not None:
+            self.strand_encoder.load_state_dict(torch.load(img2strand_ckpt))
 
         self.depth_encoder = DepthModel()
-        depth_state = torch.load(img2depth_ckpt)
-        # In Hairstep, DepthModel was loaded using torch.nn.DataParallel so need to remove module. prefix
-        if "module." in list(depth_state.keys())[0]:
-            depth_state = {k.replace("module.", ""): v for k, v in depth_state.items()}
-        self.depth_encoder.load_state_dict(depth_state)
-        # self.depth_encoder.eval()
+        if img2depth_ckpt is not None:
+            depth_state = torch.load(img2depth_ckpt)
+            # In Hairstep, DepthModel was loaded using torch.nn.DataParallel so need to remove module. prefix
+            if "module." in list(depth_state.keys())[0]:
+                depth_state = {k.replace("module.", ""): v for k, v in depth_state.items()}
+            self.depth_encoder.load_state_dict(depth_state)
 
     def forward(self, img, hair_mask, body_mask):
         """Extract HairStep features
@@ -180,7 +180,18 @@ class HairStepEncoder(nn.Module):
         body = body_mask * (1 - hair_mask)          # (B, 1, H, W)
 
         strand_pred = self.strand_encoder(img)      # (B, C, H, W)
-        strand_pred = strand_pred.clamp(0., 1.)     # (B, C, H, W)
+        # strand_pred = strand_pred.clamp(0., 1.)     # (B, C, H, W)
+        
+        # Normalize the magnitude of the strand map per pixel to force it to learn only direction
+        strand_pred = strand_pred * hair_mask
+        x = strand_pred[:, 0:1, :, :]   # (B, 1, H, W)
+        y = strand_pred[:, 1:2, :, :]   # (B, 1, H, W)
+
+        magnitude = torch.sqrt(x * x + y * y + 1e-10)       # 1e-10 to avoid div 0 later
+        x_norm = x / magnitude
+        y_norm = y / magnitude
+        strand_pred = torch.cat([x_norm, y_norm], dim=1)
+
         strand_pred = torch.cat([hair_mask+body*0.5, strand_pred*hair_mask], dim=1) # (B, 1, H, W) + (B, 2, H, W) ->(B, 3, H, W)
 
         #################### img2depth.py
