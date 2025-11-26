@@ -313,7 +313,19 @@ class BaseHairTrainer(BaseTrainer):
         plt.clf()
         plt.close()
 
-    def plot_losses(self, losses_hist):
+    def plot_curve_single(self, data, data_label, ylabel, title, plot_fig):
+        n_data = len(data)
+
+        plt.plot(np.arange(n_data).tolist(), data, color='blue', label=data_label)
+        plt.xlabel('epoch')
+        plt.ylabel(ylabel)
+        plt.legend(loc='best')
+        plt.title(f'{data_label} {title}')
+        plt.savefig(plot_fig)
+        plt.clf()
+        plt.close()
+
+    def plot_losses(self, losses_hist, plot_batch=True):
         train_losses = losses_hist['train']
         val_losses = losses_hist['val']
         # print("plot_losses", train_losses)
@@ -321,6 +333,10 @@ class BaseHairTrainer(BaseTrainer):
         losses_name = list(train_losses.keys())
         for ln in losses_name:
             self.plot_curve(train_losses[ln], val_losses[ln], 'losses', ln, os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}.png"))
+            
+            if plot_batch:
+                self.plot_curve_single(losses_hist['train_b'][ln], 'train', 'losses', ln, os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}_train_b.png"))
+                self.plot_curve_single(losses_hist['val_b'][ln], 'val', 'losses', ln, os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}_val_b.png"))
 
     def configure_optimizers(self, n_steps):
         self.n_steps = n_steps
@@ -422,6 +438,46 @@ class BaseHairTrainer(BaseTrainer):
 
         return torch.stack(depth_vis, dim=0)
 
+    def strand2vis(self, strand):
+        """Visualize strand map using HSV color wheel"""
+        ### Hairstep convention:
+        # Red = binary (0: background, 0.5: face/body, 1: hair)
+        # O(x) = (M(x), O_{2D}/2 + 0.5)
+
+        strand_map_batch = strand.detach().cpu().numpy()
+        B, _, H, W = strand_map_batch.shape
+
+        strand_vis = []
+        for b in range(B):
+            strand_map = strand_map_batch[b]
+
+            # normalized direction, should be in [-1, 1] to move to pi late
+            green_c = (strand_map[1] - 0.5) * 2       # x (to right)
+            blue_c = (strand_map[2] - 0.5) * 2        # y (down)
+
+            # compute angle 
+            theta = np.arctan2(-blue_c, green_c)     # in [-pi, pi]
+
+            # convert to 0-360
+            theta = (theta + 2*np.pi) % (2*np.pi)
+            theta = (2*np.pi - theta) % (2*np.pi)   # counter clockwise, 90 on the left
+
+            # hue mapping
+            h = theta / (2*np.pi)
+            s = np.ones_like(h)
+            v = np.ones_like(h)
+            hsv = np.stack([h, s, v], axis=-1)
+            rgb = cv2.cvtColor((hsv*255).astype(np.uint8), cv2.COLOR_HSV2RGB)
+
+            # apply hair mask
+            mask = (strand_map[0] > 0.75).astype(np.float32)
+            rgb = (rgb * mask[...,None]).astype(np.uint8)       # (H, W, C)
+            vis_b = torch.from_numpy(rgb).permute(2,0,1)      # (C, H, W)
+
+            strand_vis.append(vis_b)
+        
+        return torch.stack(strand_vis, dim=0)
+
     def save_visualizations(self, outputs, save_path):
         if 'img' in outputs and 'rendered_img' in outputs and 'masked_1st_path' in outputs:
             # TODO: overlap generated img with original
@@ -433,6 +489,9 @@ class BaseHairTrainer(BaseTrainer):
         if 'depth' in outputs:
             depth_vis = self.depth2vis(outputs['depth'], outputs['hairmask'])
             outputs['depth'] = depth_vis.to(outputs['depth'].device)
+        if 'strand' in outputs:     # use hsv instead
+            strand_vis = self.strand2vis(outputs['strand'])
+            outputs['strand'] = strand_vis.to(outputs['strand'].device)
 
         nrows = [1 if '2nd_path' not in key else 4 * self.config.train.Ke for key in image_keys]
 
@@ -446,8 +505,6 @@ class BaseHairTrainer(BaseTrainer):
         cv2.imwrite(save_path, grid)
 
     def create_visualizations(self, batch, outputs):
-        # zero_pose_cam = torch.tensor([7,0,0]).unsqueeze(0).repeat(batch['img'].shape[0], 1).float().to(self.config.device)
-
         # batch keys are already in device, so no need to move them
         # outputs are in cpu, so we need to move them to device if we want to use them in the renderer
 
@@ -460,15 +517,8 @@ class BaseHairTrainer(BaseTrainer):
 
         # 2. Base model
         base_output = self.base_encoder(batch['img'], batch['hairmask'], batch['bodymask'])
-        # flame_output_base = self.flame.forward(base_output)
-        # rendered_img_base = self.renderer.forward(flame_output_base['vertices'], base_output['cam'])['rendered_img']
         visualizations['strand_base'] = base_output['strand_params']
         visualizations['depth_base'] = base_output['depth_params']
-    
-        # flame_output_zero = self.flame.forward(outputs['encoder_output'], zero_expression=True, zero_pose=True)
-        # rendered_img_zero = self.renderer.forward(flame_output_zero['vertices'].to(self.config.device), zero_pose_cam)['rendered_img']
-        # visualizations['rendered_img_zero'] = rendered_img_zero
-    
     
         if self.config.arch.enable_fuse_generator:
             visualizations['reconstructed_img'] = outputs['reconstructed_img']
@@ -478,33 +528,9 @@ class BaseHairTrainer(BaseTrainer):
         for key in visualizations.keys():
             visualizations[key] = visualizations[key].detach().cpu()
 
-        # # 3. MICA
-        # if self.config.train.loss_weights['mica_loss'] > 0:
-        #     mica_output_shape = self.mica(batch['img_mica'])
-        #     mica_output = copy.deepcopy(base_output) # just to get the keys and structure
-        #     mica_output['shape_params'] = mica_output_shape['shape_params']
-
-        #     if self.config.arch.num_shape < 300:
-        #         # WARNING: we are visualizing using only the first num_shape parameters
-        #         mica_output['shape_params'] = mica_output['shape_params'][:, :self.config.arch.num_shape]
-
-        #     flame_output_mica = self.flame.forward(mica_output, zero_expression=True, zero_pose=True)
-        #     rendered_img_mica_zero = self.renderer.forward(flame_output_mica['vertices'], zero_pose_cam)['rendered_img']
-        #     visualizations['rendered_img_mica_zero'] = rendered_img_mica_zero
-
-        #     visualizations['img_mica'] = batch['img_mica'].reshape(-1, 3, 112, 112)
-        #     visualizations['img_mica'] = F.interpolate(visualizations['img_mica'], self.config.image_size).detach().cpu()
-
-
         if self.config.train.loss_weights['cycle_loss'] > 0:
             if '2nd_path' in outputs:
                 visualizations['2nd_path'] = outputs['2nd_path']
-
-        # # landmarks
-        # visualizations['landmarks_mp'] = outputs['landmarks_mp']
-        # visualizations['landmarks_mp_gt'] = outputs['landmarks_mp_gt']
-        # visualizations['landmarks_fan'] = outputs['landmarks_fan']
-        # visualizations['landmarks_fan_gt'] = outputs['landmarks_fan_gt']
 
         return visualizations
 

@@ -50,7 +50,7 @@ if __name__ == '__main__':
     # this is used for regularization w.r.t. the base model as well as to compare the results    
     trainer.create_base_encoder()
 
-    losses_hist = {'train': {}, 'val': {}}
+    losses_hist = {'train': {}, 'val': {}, 'train_b': {}, 'val_b': {}}
     for epoch in tqdm(range(config.train.resume_epoch, config.train.num_epochs)):
         # restart everything at each epoch!
         trainer.configure_optimizers(len(train_loader))
@@ -73,6 +73,7 @@ if __name__ == '__main__':
                 current_loss = trainer.current_loss
                 for k, v in current_loss.items():
                     epoch_loss_sum[k] += v
+                    losses_hist[f"{phase}_b"].setdefault(k, []).append(v)
 
                 if batch_idx % config.train.visualize_every == 0:
                     with torch.no_grad():
