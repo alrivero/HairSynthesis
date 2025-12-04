@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import cv2
 from src.renderer.util import vertex_normals, face_vertices 
 from src.FLAME.lbs import vertices2landmarks
+import imageio.v2 as imageio
 
 
 def load_probabilities_per_FLAME_triangle():
@@ -128,6 +129,9 @@ def transfer_pixels(img, points1, points2, rbound=None):
 
     return retained_pixels
 
+# def transfer_pixels_hair(img, points1, points2, rbound=None):
+
+
 
 def mesh_based_mask_uniform_faces(flame_trans_verts, flame_faces, face_probabilities, mask_ratio=0.1, coords=None, IMAGE_SIZE=224):
     """
@@ -181,17 +185,17 @@ def mesh_based_mask_uniform_faces(flame_trans_verts, flame_faces, face_probabili
     return npoints, {'sampled_faces_indices':sampled_faces_indices, 'barycentric_coords':barycentric_coords}
 
 
-def mask_uniform_hair(hair_mask, mask_ratio=0.1, IMAGE_SIZE=224):
+def mask_uniform_hair(hair_mask, mask_ratio=0.1):
     """
     Samples points from the hair based on the mask ratio.
 
     hair_mask: (B, 1, H, W)
     """
-    batch_size = hair_mask.size(0)
+    batch_size, _, h, w = hair_mask.size()
     device = hair_mask.device
 
     # if mask_ratio is single value, then use it as a ratio of the image size
-    num_points_to_sample = int(mask_ratio * IMAGE_SIZE * IMAGE_SIZE)
+    num_points_to_sample = int(mask_ratio * h * w)
 
     # sampling per image in the batch
     samples = []
@@ -207,3 +211,17 @@ def mask_uniform_hair(hair_mask, mask_ratio=0.1, IMAGE_SIZE=224):
         samples.append(sample_b)
 
     return torch.cat(samples, dim=0)    # (B, N, 2)
+
+
+# if __name__ == "__main__":
+#     hairmask_file = "/gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/seg/00000.png"
+#     hairmask_img = (imageio.imread(hairmask_file)/255.>0.5)[:,:,None]
+#     hairmask_img = torch.from_numpy(hairmask_img).permute(2, 0, 1).unsqueeze(0)
+
+#     samples = mask_uniform_hair(hairmask_img)
+#     print(samples.shape)
+
+#     hairmask_cp = hairmask_img.copy()
+#     for p in samples[0]:
+#         y, x
+

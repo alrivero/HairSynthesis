@@ -15,3 +15,8 @@ __pycache__/
 results/
 samples/
 *.png
+
+logs*/
+
+# these are updated to corresponding repo
+external/

@@ -5,8 +5,6 @@ from torch import nn
 import timm
 import torchvision.transforms as transforms
 
-# import sys
-# sys.path.append("/gpfs/projects/CascanteBonillaGroup/thinguyen/storage/HairStep")
 from external.HairStep.lib.model.img2hairstep.UNet import Model as StrandModel
 from external.HairStep.lib.model.img2hairstep.hourglass import Model as DepthModel
 from utils.torchutils import torch_nanminmax
@@ -147,6 +145,7 @@ class HairStepEncoder(nn.Module):
     def __init__(self,
                  img2strand_ckpt=None,
                  img2depth_ckpt=None,
+                 config=None
                  ) -> None:
         super().__init__()
         
@@ -157,13 +156,16 @@ class HairStepEncoder(nn.Module):
         if img2strand_ckpt is not None:
             self.strand_encoder.load_state_dict(torch.load(img2strand_ckpt))
 
-        self.depth_encoder = DepthModel()
-        if img2depth_ckpt is not None:
-            depth_state = torch.load(img2depth_ckpt)
-            # In Hairstep, DepthModel was loaded using torch.nn.DataParallel so need to remove module. prefix
-            if "module." in list(depth_state.keys())[0]:
-                depth_state = {k.replace("module.", ""): v for k, v in depth_state.items()}
-            self.depth_encoder.load_state_dict(depth_state)
+        if config.arch.depth_branch:
+            self.depth_encoder = DepthModel()
+            if img2depth_ckpt is not None:
+                depth_state = torch.load(img2depth_ckpt)
+                # In Hairstep, DepthModel was loaded using torch.nn.DataParallel so need to remove module. prefix
+                if "module." in list(depth_state.keys())[0]:
+                    depth_state = {k.replace("module.", ""): v for k, v in depth_state.items()}
+                self.depth_encoder.load_state_dict(depth_state)
+        
+        self.config = config
 
     def forward(self, img, hair_mask, body_mask):
         """Extract HairStep features
@@ -180,42 +182,55 @@ class HairStepEncoder(nn.Module):
         body = body_mask * (1 - hair_mask)          # (B, 1, H, W)
 
         strand_pred = self.strand_encoder(img)      # (B, C, H, W)
-        # strand_pred = strand_pred.clamp(0., 1.)     # (B, C, H, W)
         
-        # Normalize the magnitude of the strand map per pixel to force it to learn only direction
-        strand_pred = strand_pred * hair_mask
-        x = strand_pred[:, 0:1, :, :]   # (B, 1, H, W)
-        y = strand_pred[:, 1:2, :, :]   # (B, 1, H, W)
+        if self.config.arch.encoder_norm_strand_magnitude:
+            # Normalize the magnitude of the strand map per pixel to force it to learn only direction
+            strand_pred = strand_pred * hair_mask
+            x = strand_pred[:, 0:1, :, :]   # (B, 1, H, W)
+            y = strand_pred[:, 1:2, :, :]   # (B, 1, H, W)
 
-        magnitude = torch.sqrt(x * x + y * y + 1e-10)       # 1e-10 to avoid div 0 later
-        x_norm = x / magnitude
-        y_norm = y / magnitude
-        strand_pred = torch.cat([x_norm, y_norm], dim=1)
+            magnitude = torch.sqrt(x * x + y * y + 1e-10)       # 1e-10 to avoid div 0 later
+            x_norm = x / magnitude
+            y_norm = y / magnitude
+            strand_pred = torch.cat([x_norm, y_norm], dim=1)            
+        else:
+            strand_pred = strand_pred.clamp(0., 1.)
+        
+        # print("----- forward")
+        # tmp = strand_pred[0]
+        # print("strand", strand_pred[0].shape)
+        # print(torch.min(tmp[0, :, :]), torch.max(tmp[0, :, :]))
+        # print(torch.min(tmp[1, :, :]), torch.max(tmp[1, :, :]))
 
         strand_pred = torch.cat([hair_mask+body*0.5, strand_pred*hair_mask], dim=1) # (B, 1, H, W) + (B, 2, H, W) ->(B, 3, H, W)
 
         #################### img2depth.py
-        depth_pred = self.depth_encoder(img)        # (B, 1, H, W)
+        if self.config.arch.depth_branch:
+            depth_pred = self.depth_encoder(img)        # (B, 1, H, W)
 
-        # Normalization: min and max should be from mask region only the mask region can have 0 so we cannot simply taking min where depth_pred not 0 in mask. Do this by assigning a large constant to the background to avoid including that when finding the max, min
-        abs_max_nonnan = torch.abs(torch_nanminmax(depth_pred, 'max', dim=(1, 2, 3), keepdim=True))     # (B, 1, 1, 1)
-        abs_min_nonnan = torch.abs(torch_nanminmax(depth_pred, 'min', dim=(1, 2, 3), keepdim=True))     # (B, 1, 1, 1)
-        # print("abs_max_nonnan", abs_max_nonnan.shape, "abs_min_nonnan", abs_min_nonnan.shape)
+            # Normalization: min and max should be from mask region only the mask region can have 0 so we cannot simply taking min where depth_pred not 0 in mask. Do this by assigning a large constant to the background to avoid including that when finding the max, min
+            abs_max_nonnan = torch.abs(torch_nanminmax(depth_pred, 'max', dim=(1, 2, 3), keepdim=True))     # (B, 1, 1, 1)
+            abs_min_nonnan = torch.abs(torch_nanminmax(depth_pred, 'min', dim=(1, 2, 3), keepdim=True))     # (B, 1, 1, 1)
+            # print("abs_max_nonnan", abs_max_nonnan.shape, "abs_min_nonnan", abs_min_nonnan.shape)
 
-        depth_pred_masked = depth_pred * hair_mask - (1 - hair_mask) * (abs_max_nonnan + abs_min_nonnan)    # (B, 1, H, W)
-        # print("depth_pred_masked", depth_pred_masked.shape)
-        max_val = torch_nanminmax(depth_pred_masked, 'max', dim=(1, 2, 3), keepdim=True)        # (B, 1, 1, 1)
-        min_val = torch_nanminmax(depth_pred_masked + 2 * (1 - hair_mask) * (abs_max_nonnan + abs_min_nonnan), 'min', dim=(1, 2, 3), keepdim=True)        # (B, 1, 1, 1)
-        # print("max_val", max_val.shape, "min_val", min_val.shape)
+            depth_pred_masked = depth_pred * hair_mask - (1 - hair_mask) * (abs_max_nonnan + abs_min_nonnan)    # (B, 1, H, W)
+            # print("depth_pred_masked", depth_pred_masked.shape)
+            max_val = torch_nanminmax(depth_pred_masked, 'max', dim=(1, 2, 3), keepdim=True)        # (B, 1, 1, 1)
+            min_val = torch_nanminmax(depth_pred_masked + 2 * (1 - hair_mask) * (abs_max_nonnan + abs_min_nonnan), 'min', dim=(1, 2, 3), keepdim=True)        # (B, 1, 1, 1)
+            # print("max_val", max_val.shape, "min_val", min_val.shape)
 
-        depth_pred_norm = (depth_pred_masked - min_val) / (max_val - min_val) * hair_mask   # (B, 1, H, W)
-        depth_pred_norm = depth_pred_norm.clamp(0., 1.)                                     # (B, 1, H, W)
-        # print("depth_pred_norm", depth_pred_norm.shape)
+            depth_pred_norm = (depth_pred_masked - min_val) / (max_val - min_val) * hair_mask   # (B, 1, H, W)
+            depth_pred_norm = depth_pred_norm.clamp(0., 1.)                                     # (B, 1, H, W)
+            # print("depth_pred_norm", depth_pred_norm.shape)
 
-        hairstep = {
-            'strand_params': strand_pred,
-            'depth_params': depth_pred_norm
-        }
+            hairstep = {
+                'strand_params': strand_pred,
+                'depth_params': depth_pred_norm
+            }
+        else:
+            hairstep = {
+                'strand_params': strand_pred,
+            }
 
         return hairstep
 

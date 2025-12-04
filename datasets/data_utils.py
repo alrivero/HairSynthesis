@@ -8,12 +8,12 @@ from datasets.mixed_dataset_sampler import MixedDatasetBatchSampler
 import os
 
 
-def load_dataloaders(config):
+def load_dataloaders(config, split_file=None):
     # ----------------------- initialize datasets ----------------------- #
     # train_dataset_LRS3, val_dataset_LRS3, test_dataset_LRS3 = get_datasets_LRS3(config)
     # train_dataset_MEAD, val_dataset_MEAD, test_dataset_MEAD = get_datasets_MEAD(config)
     # train_dataset_MEAD_sides, val_dataset_MEAD_sides, test_dataset_MEAD_sides = get_datasets_MEAD_sides(config)
-    train_dataset_ffhq, val_dataset_ffhq, _ = get_datasets_FFHQ(config)
+    train_dataset_ffhq, val_dataset_ffhq, _ = get_datasets_FFHQ(config, split_file)
     # train_dataset_celeba = get_datasets_CelebA(config)
     
     dataset_percentages = {
@@ -57,7 +57,7 @@ def load_dataloaders(config):
     val_dataset = torch.utils.data.ConcatDataset([val_dataset_ffhq])
                                              
     # train_loader = torch.utils.data.DataLoader(train_dataset, batch_sampler=sampler, num_workers=config.train.num_workers, collate_fn=collate_fn)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config.train.batch_size, shuffle=True, num_workers=config.train.num_workers, drop_last=False)  # TODO: change back to MixedDatasetBatchSampler, currently crash at epoch 4 so use this, but will need MixedDatasetBatchSampler for training on all datasets
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config.train.batch_size, shuffle=True, num_workers=config.train.num_workers, drop_last=False, collate_fn=collate_fn)  # TODO: change back to MixedDatasetBatchSampler, currently crash at epoch 4 so use this, but will need MixedDatasetBatchSampler for training on all datasets
     print("train_dataset", len(train_dataset))
     
     # val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=True, collate_fn=collate_fn)

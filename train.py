@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 from collections import defaultdict
 from datasets.data_utils import load_dataloaders
+import time
 
 
 def parse_args():
@@ -28,6 +29,7 @@ if __name__ == '__main__':
     if config.train.log_append_timestamp:
         start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         config.train.log_path = os.path.join(config.train.log_path, start_time)
+    print("Output", config.train.log_path)
     os.makedirs(config.train.log_path, exist_ok=True)
     train_images_save_path = os.path.join(config.train.log_path, 'train_images')
     os.makedirs(train_images_save_path, exist_ok=True)
@@ -36,6 +38,7 @@ if __name__ == '__main__':
     loss_plots_save_path = os.path.join(config.train.log_path, 'loss_plots')
     os.makedirs(loss_plots_save_path, exist_ok=True)    
     OmegaConf.save(config, os.path.join(config.train.log_path, 'config.yaml'))
+    start_time = time.perf_counter()
 
     train_loader, val_loader = load_dataloaders(config)
     print("train_loader", len(train_loader), "val_loader", len(val_loader))
@@ -76,6 +79,9 @@ if __name__ == '__main__':
                     losses_hist[f"{phase}_b"].setdefault(k, []).append(v)
 
                 if batch_idx % config.train.visualize_every == 0:
+                    if not config.train.visualize_phase.get(phase, False):
+                        continue
+                    
                     with torch.no_grad():
                         visualizations = trainer.create_visualizations(batch, outputs)
                         trainer.save_visualizations(visualizations, f"{config.train.log_path}/{phase}_images/{epoch}_{batch_idx}.jpg")
@@ -89,5 +95,8 @@ if __name__ == '__main__':
             # print("losses_hist", losses_hist)
         trainer.plot_losses(losses_hist)
 
-        if epoch % config.train.save_every == 0:
+        if epoch % config.train.save_every == 0 or epoch == (config.train.num_epochs-1):
             trainer.save_model(trainer.state_dict(), os.path.join(config.train.log_path, 'model_{}.pt'.format(epoch)))
+
+    elapsed = time.perf_counter() - start_time
+    print(f"Elapsed: {int(elapsed // 60)} min {(elapsed % 60):.2f} sec")

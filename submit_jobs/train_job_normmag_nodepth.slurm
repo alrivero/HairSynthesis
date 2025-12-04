@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
 #SBATCH --mem=80GB
-#SBATCH --time=4:00:00
+#SBATCH --time=5:00:00
 
 # Load required modules
 module load cuda120/toolkit/12.0
@@ -42,7 +42,11 @@ conda activate smirk
 
 # Run the application
 echo "Starting computation..."
-srun python train.py configs/config_train_hs.yaml
+
+CMD="python train.py configs/config_train_hs_normmag_nodepth.yaml"
+echo "Running command:"
+echo "srun $CMD"
+srun $CMD
 
 # Post-processing (if needed)
 echo "Job completed at: $(date)"

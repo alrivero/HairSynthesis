@@ -406,11 +406,13 @@ class SmirkHairTrainer(BaseHairTrainer):
         ### If enable_fuse_generator, train both encoder and generator
         if self.config.arch.enable_fuse_generator:
             # input: strand (C=3), depth (C=1), sampled color image (C=3)
-            self.smirk_generator = SmirkGenerator(in_channels=7, out_channels=3, init_features=32, res_blocks=5)
+            gen_in_channel = 7 if self.config.arch.depth_branch else 6
+            self.smirk_generator = SmirkGenerator(in_channels=gen_in_channel, out_channels=3, init_features=32, res_blocks=5)
             
         self.smirk_encoder = HairStepEncoder(
             img2strand_ckpt=config.checkpoint_img2strand,
-            img2depth_ckpt=config.checkpoint_img2depth)
+            img2depth_ckpt=config.checkpoint_img2depth,
+            config=self.config)
         
         self.setup_losses()
         self.current_loss = None
@@ -428,9 +430,19 @@ class SmirkHairTrainer(BaseHairTrainer):
             base_output = self.base_encoder(batch['img'], batch['hairmask'], batch['bodymask'])
 
         strand_output = encoder_output['strand_params']     # (B, 3, H, W)
-        depth_output = encoder_output['depth_params']       # (B, 1, H, W)
-        strand_depth_output = torch.cat([strand_output, depth_output], dim=1)   # (B, 4, H, W)
- 
+        # print("step1")
+        # tmp = strand_output[0]
+        # print("strand", strand_output.shape)
+        # print(torch.min(tmp[0, :, :]), torch.max(tmp[0, :, :]))
+        # print(torch.min(tmp[1, :, :]), torch.max(tmp[1, :, :]))
+        # print(torch.min(tmp[2, :, :]), torch.max(tmp[2, :, :]))
+
+        if self.config.arch.depth_branch:
+            depth_output = encoder_output['depth_params']       # (B, 1, H, W)
+            strand_depth_output = torch.cat([strand_output, depth_output], dim=1)   # (B, 4, H, W)
+        else:
+            strand_depth_output = strand_output
+    
         # ---------------- losses ---------------- #
         losses = {}
 
@@ -447,23 +459,34 @@ class SmirkHairTrainer(BaseHairTrainer):
 
         # L2 loss on weights for regularization
         losses['strand_regularization'] = torch.mean((encoder_output['strand_params'] - base_output['strand_params'])**2)
-        losses['depth_regularization'] = torch.mean((encoder_output['depth_params'] - base_output['depth_params'])**2)
+        if self.config.arch.depth_branch:
+            losses['depth_regularization'] = torch.mean((encoder_output['depth_params'] - base_output['depth_params'])**2)
 
         if self.config.arch.enable_fuse_generator:
             masks = batch['hairmask']   # (B, 1, H, W)
 
             # mask out hair and add random points inside the hair
-            tmask_ratio = self.config.train.mask_ratio #* self.config.train.mask_ratio_mul # upper bound on the number of points to sample
+            tmask_ratio = self.config.train.mask_ratio # ratio of number of points to sample
 
             # select pixel points from hair mask
-            hair_sampled_points = masking_utils.mask_uniform_hair(masks, tmask_ratio, self.config.image_size)   # (B, N, 2), N = number of points
+            hair_sampled_points = masking_utils.mask_uniform_hair(masks, tmask_ratio)   # (B, N, 2), N = number of points
             extra_points = masking_utils.transfer_pixels(img, hair_sampled_points, hair_sampled_points)         # (B, 3, H, W) - mask in the original image which point will be used
+            # extra_points = torch.zeros_like(img)  #debug
 
             # completed masked img - mask out the hair and add the extra points
-            masked_img = masking_utils.masking(img, masks, extra_points, self.config.train.mask_dilation_radius)    # (B, 3, H, W)
+            masks_rest = 1 - masks      # Take the rest
+            masked_img = masking_utils.masking(img, masks_rest, extra_points, self.config.train.mask_dilation_radius)    # (B, 3, H, W)
+
+            # import imageio.v2 as imageio
+            # img_tmp = img[0].detach().cpu().numpy().transpose(1, 2, 0)
+            # img_tmp = (img_tmp * 255).astype(np.uint8)
+            # mask_tmp = masked_img[0].detach().cpu().numpy().transpose(1, 2, 0)
+            # mask_tmp = (mask_tmp * 255).astype(np.uint8)
+            # print(np.min(mask_tmp), np.max(mask_tmp))
+            # imageio.imwrite("results/debug/img.png", img_tmp)
+            # imageio.imwrite("results/debug/mask_xpts.png", mask_tmp)
 
             reconstructed_img = self.smirk_generator(torch.cat([strand_depth_output, masked_img], dim=1))
-            # reconstructed_img = self.smirk_generator(img)
 
             # reconstruction loss
             reconstruction_loss = F.l1_loss(reconstructed_img, img, reduction='none')
@@ -479,7 +502,51 @@ class SmirkHairTrainer(BaseHairTrainer):
             losses['reconstruction_loss'] = 0
             losses['perceptual_vgg_loss'] = 0
 
-        fuse_generator_losses = losses['perceptual_vgg_loss'] * self.config.train.loss_weights['perceptual_vgg_loss'] + losses['reconstruction_loss'] * self.config.train.loss_weights['reconstruction_loss'] + losses['strand_regularization'] * self.config.train.loss_weights['strand_regularization'] + losses['depth_regularization'] * self.config.train.loss_weights['depth_regularization']
+        # Local smooth loss
+        if self.config.train.loss_weights['strand_local_regularization'] > 0:
+            eps = 1e-10
+            strand_params = encoder_output['strand_params']     # (B, 3, H, W)
+
+            orient = strand_params[:, 1:3, :, :]          # (B, 2, H, W), first channel is mask
+            hairmask = batch['hairmask']   # (B, 1, H, W)
+            smooth_kernel = self.config.train.loss_weights.strand_local_kernel
+            smooth_stride = self.config.train.loss_weights.strand_local_stride
+            smooth_pad = self.config.train.loss_weights.strand_local_padding
+
+            # Get neighbors: use hairmask to compute only on hair region
+            local_sum = F.avg_pool2d(orient * hairmask, kernel_size=smooth_kernel, stride=smooth_stride, padding=smooth_pad) * 9
+            local_count = F.avg_pool2d(hairmask, kernel_size=smooth_kernel, stride=smooth_stride, padding=smooth_pad) * 9 + eps
+            
+            local_mean = local_sum / local_count
+            local_norm = torch.clamp(torch.linalg.norm(local_mean, dim=1, keepdim=True), min=eps)
+            local_dir = local_mean / local_norm     # (B, 2, H, W)
+            # print(local_norm.min(), local_norm.max())
+
+            orient_norm = torch.clamp(torch.linalg.norm(orient, dim=1, keepdim=True), min=eps)
+            orient_dir = orient / orient_norm       # (B, 2, H, W)
+            # print(orient_norm.min(), orient_norm.max())
+
+            # Use cosine similarity, vectors are already normalize to have magnitude 1
+            # cos = 1 matches, cos = 0 perpendicular, cos = -1 opposite
+            local_similarity = (orient_dir * local_dir).sum(dim=1, keepdim=True)    # (B, 1, H, W)
+
+            # minimize cos/local_similarity
+            local_loss = (1 - local_similarity) * hairmask
+
+            # average over hairmask
+            losses['strand_local_regularization'] = local_loss.sum() / (hairmask.sum() + 1e-10)
+            # print(losses['strand_local_regularization'])
+        else:
+            losses['strand_local_regularization'] = 0
+
+        fuse_generator_losses = (losses['perceptual_vgg_loss'] * self.config.train.loss_weights['perceptual_vgg_loss'] + 
+                                losses['reconstruction_loss'] * self.config.train.loss_weights['reconstruction_loss'] + 
+                                losses['strand_regularization'] * self.config.train.loss_weights['strand_regularization'] + 
+                                losses['strand_local_regularization'] * self.config.train.loss_weights['strand_local_regularization']
+                                )
+
+        if self.config.arch.depth_branch:
+            fuse_generator_losses += losses['depth_regularization'] * self.config.train.loss_weights['depth_regularization']
                
         loss_first_path = (
             (fuse_generator_losses if self.config.arch.enable_fuse_generator else 0)
@@ -492,7 +559,8 @@ class SmirkHairTrainer(BaseHairTrainer):
         outputs = {}
         outputs['img'] = img
         outputs['strand'] = strand_output
-        outputs['depth'] = depth_output
+        if self.config.arch.depth_branch:
+            outputs['depth'] = depth_output
         
         if self.config.arch.enable_fuse_generator:
             outputs['loss_img'] = loss_img

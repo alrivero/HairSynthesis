@@ -277,12 +277,16 @@ class BaseHairTrainer(BaseTrainer):
         self.config = config
 
         # Setup logger to save training loss to a file
-        self.logger = logging.getLogger()
-        logging.getLogger('matplotlib.font_manager').disabled = True
-        self.logger.setLevel(logging.INFO)
-        fh = logging.FileHandler(os.path.join(config.train.log_path, 'logs.log'))
-        fh.setLevel(logging.INFO)
-        self.logger.addHandler(fh)
+        if config.train.log_path is not None:
+            log_file = os.path.join(config.train.log_path, 'logs.log')
+            assert not os.path.exists(log_file), f"{os.path.join(log_file)} existed!"
+
+            self.logger = logging.getLogger()
+            logging.getLogger('matplotlib.font_manager').disabled = True
+            self.logger.setLevel(logging.INFO)
+            fh = logging.FileHandler(os.path.join(log_file))
+            fh.setLevel(logging.INFO)
+            self.logger.addHandler(fh)
 
     def logging(self, batch_idx, losses, phase):
         # ---------------- logging ---------------- #
@@ -355,8 +359,9 @@ class BaseHairTrainer(BaseTrainer):
             params = []
             if self.config.train.optimize_hairstrand:
                 params += list(self.smirk_encoder.strand_encoder.parameters()) 
-            if self.config.train.optimize_hairdepth:
-                params += list(self.smirk_encoder.depth_encoder.parameters())
+            if self.config.arch.depth_branch:
+                if self.config.train.optimize_hairdepth:
+                    params += list(self.smirk_encoder.depth_encoder.parameters())
 
             self.encoder_optimizer = torch.optim.Adam(params, lr= encoder_scale * self.config.train.lr)
                 
@@ -439,7 +444,9 @@ class BaseHairTrainer(BaseTrainer):
         return torch.stack(depth_vis, dim=0)
 
     def strand2vis(self, strand):
-        """Visualize strand map using HSV color wheel"""
+        """Visualize strand map using HSV color wheel
+        strand_map is in [-1, 1], already normalize per pixel by the magnitude
+        """
         ### Hairstep convention:
         # Red = binary (0: background, 0.5: face/body, 1: hair)
         # O(x) = (M(x), O_{2D}/2 + 0.5)
@@ -449,31 +456,42 @@ class BaseHairTrainer(BaseTrainer):
 
         strand_vis = []
         for b in range(B):
-            strand_map = strand_map_batch[b]
+            strand_map = strand_map_batch[b]        # already normalized to be in [-1, 1]
+            # print("strand_map 1", np.min(strand_map[1]), np.max(strand_map[1]))
+            # print("strand_map 2", np.min(strand_map[2]), np.max(strand_map[2]))
 
-            # normalized direction, should be in [-1, 1] to move to pi late
-            green_c = (strand_map[1] - 0.5) * 2       # x (to right)
-            blue_c = (strand_map[2] - 0.5) * 2        # y (down)
+            green_c = strand_map[1]     # x (to right)
+            blue_c = strand_map[2]      # y (down)
 
             # compute angle 
             theta = np.arctan2(-blue_c, green_c)     # in [-pi, pi]
 
-            # convert to 0-360
+            # convert to 0-2pi
             theta = (theta + 2*np.pi) % (2*np.pi)
-            theta = (2*np.pi - theta) % (2*np.pi)   # counter clockwise, 90 on the left
+            theta = (2*np.pi) - theta       # counter clockwise, 90 on the left
 
             # hue mapping
-            h = theta / (2*np.pi)
+            h = theta / (2*np.pi)       # to [0, 1]
             s = np.ones_like(h)
             v = np.ones_like(h)
-            hsv = np.stack([h, s, v], axis=-1)
-            rgb = cv2.cvtColor((hsv*255).astype(np.uint8), cv2.COLOR_HSV2RGB)
+
+            # OpenCV HSV: H in [0,179], S,V in [0,255]
+            hsv = np.zeros((H, W, 3), dtype=np.uint8)
+            hsv[:, :, 0] = (h * 179)
+            hsv[:, :, 1] = (s * 255)
+            hsv[:, :, 2] = (v * 255)
+
+            # print("h range:", h.min(), h.max())
+            # print("s range:", s.min(), s.max())
+            # print("v range:", v.min(), v.max())
+
+            rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB) / 255.0       # convert to [0, 1] bc save_visualization assume this as input
 
             # apply hair mask
             mask = (strand_map[0] > 0.75).astype(np.float32)
-            rgb = (rgb * mask[...,None]).astype(np.uint8)       # (H, W, C)
+            rgb = (rgb * mask[...,None])       # (H, W, C)
             vis_b = torch.from_numpy(rgb).permute(2,0,1)      # (C, H, W)
-
+            
             strand_vis.append(vis_b)
         
         return torch.stack(strand_vis, dim=0)
@@ -483,14 +501,14 @@ class BaseHairTrainer(BaseTrainer):
             # TODO: overlap generated img with original
             outputs['overlap_image'] = outputs['img'] * 0.7 + outputs['rendered_img'] * 0.3
             outputs['overlap_image_pixels'] = outputs['img'] * 0.7 +  0.3 * outputs['masked_1st_path']
-        # outputs: strand and depth are in [0, 1]
+        # outputs: depth are in [0, 1], strand are in [-1, 1]
         
         image_keys = ['img', 'strand', 'depth']
         if 'depth' in outputs:
             depth_vis = self.depth2vis(outputs['depth'], outputs['hairmask'])
             outputs['depth'] = depth_vis.to(outputs['depth'].device)
         if 'strand' in outputs:     # use hsv instead
-            strand_vis = self.strand2vis(outputs['strand'])
+            strand_vis = self.strand2vis(outputs['strand'])     # in [0, 1]
             outputs['strand'] = strand_vis.to(outputs['strand'].device)
 
         nrows = [1 if '2nd_path' not in key else 4 * self.config.train.Ke for key in image_keys]
@@ -512,13 +530,15 @@ class BaseHairTrainer(BaseTrainer):
         visualizations['img'] = batch['img']
         visualizations['hairmask'] = batch['hairmask']
         visualizations['strand'] = outputs['strand']
-        visualizations['depth'] = outputs['depth']
+        if self.config.arch.depth_branch:
+            visualizations['depth'] = outputs['depth']
         # visualizations['rendered_img'] = outputs['rendered_img']
 
         # 2. Base model
         base_output = self.base_encoder(batch['img'], batch['hairmask'], batch['bodymask'])
         visualizations['strand_base'] = base_output['strand_params']
-        visualizations['depth_base'] = base_output['depth_params']
+        if self.config.arch.depth_branch:
+            visualizations['depth_base'] = base_output['depth_params']
     
         if self.config.arch.enable_fuse_generator:
             visualizations['reconstructed_img'] = outputs['reconstructed_img']
@@ -573,3 +593,77 @@ class BaseHairTrainer(BaseTrainer):
 
         self.config.train.freeze_encoder_in_second_path = decision_idx_second_path % 2 == 0
         self.config.train.freeze_generator_in_second_path = decision_idx_second_path % 2 == 1
+
+
+if __name__ == "__main__":
+    """ 
+    python -m src.base_trainer
+    """
+    import types
+    import math
+    import torch
+    from torchvision.utils import make_grid
+    import matplotlib.pyplot as plt
+
+    # dummy config for trainer
+    dummy_cfg = types.SimpleNamespace()
+    dummy_cfg.train = types.SimpleNamespace(
+        log_path=None,
+        optimize_hairstrand=False,
+        optimize_hairdepth=False,
+    )
+
+    dummy_cfg.device = "cpu"
+    dummy_cfg.image_size = (64, 64)
+
+    trainer = BaseHairTrainer(config=dummy_cfg)
+
+    # Some test angles
+    H, W = 64, 64
+    angles_deg = [0, 60, 120, 180, 240, 300]
+    B = len(angles_deg)
+
+    # strand: (B, 3, H, W)
+    strand = torch.zeros(B, 3, H, W, dtype=torch.float32)
+
+    # Channel 0 = hair mask
+    strand[:, 0, :, :] = 1.0
+
+    for i, theta_deg in enumerate(angles_deg):
+        theta_rad = math.radians(theta_deg)
+
+        # green_c = x, blue_c = y (down positive)
+        green_c = math.cos(theta_rad)     # [-1, 1]
+        blue_c = -math.sin(theta_rad)     # [-1, 1]     # makes y down, strand2vis expects y-down as input
+
+        strand[i, 1, :, :] = green_c
+        strand[i, 2, :, :] = blue_c
+
+    # strand2vis returns RGB values for display, in [0, 255]
+    vis = trainer.strand2vis(strand)  # (B, 3, H, W)
+
+    grid = make_grid(vis, nrow=B)
+    grid = grid.permute(1,2,0).cpu().numpy()*255.0
+    grid = np.clip(grid, 0, 255).astype(np.uint8)
+    grid = cv2.cvtColor(grid, cv2.COLOR_RGB2BGR)
+
+    # Add text
+    H, W, _ = grid.shape
+    patch_w = W // len(angles_deg)
+
+    for i, deg in enumerate(angles_deg):
+        x = int(i * patch_w + 5)
+        y = int(H - 10)
+        
+        cv2.putText(grid, f"{deg}", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1, cv2.LINE_AA)
+
+    cv2.imwrite("/gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/strand_hsv_test.png", grid)
+
+    # plt.imshow(img)
+    # plt.title(f"degrees {angles_deg}")
+    # plt.axis("off")
+    # plt.savefig("/gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/strand_hsv_test.png", bbox_inches="tight")
+
+    
+
+

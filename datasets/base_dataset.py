@@ -219,7 +219,7 @@ class BaseHairDataset(BaseDataset):
     def __init__(self, data_list, config, test=False):
         self.data_list = data_list
         self.config = config
-        self.image_size = config.image_size
+        # self.image_size = config.image_size
         self.test = test
 
         # if not self.test:
@@ -238,7 +238,7 @@ class BaseHairDataset(BaseDataset):
                 # A.GaussNoise(p=0.5),
                 # # affine ones
                 # A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, border_mode=0, p=0.9),
-            ], additional_targets={'hair_mask': 'mask', 'body_mask': 'mask'})
+            ], additional_targets={'hairmask': 'mask', 'bodymask': 'mask'})
 
     def __len__(self):
         return len(self.data_list)
