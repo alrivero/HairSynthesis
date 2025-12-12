@@ -63,8 +63,15 @@ dataset:
   FFHQ_hairmask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/seg
   FFHQ_bodymask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/body_img
 
+  HiSA_path: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/HiSa_HiDa/img   # (512, 512, 3)
+  HiSA_hairmask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/HiSa_HiDa/seg
+  HiSA_bodymask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/HiSa_HiDa/body_img
+  HiSA_strand: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/HiSa_HiDa/strand_map
+
   # percentage of data to use for each dataset
   FFHQ_percentage: 1    # sampling weight when training multiple datasets
+  HiSA_percentage: 1
 
   # using subset of the dataset only
   FFHQ_percentage_subset: 0.1 # 0.001 # 0.01
+  HiSA_percentage_subset: 1

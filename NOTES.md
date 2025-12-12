@@ -4,14 +4,11 @@ Using smirk env, install as needed:
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
 
-## Folder
-```bash
-cd /gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/external/HairStep
-```
-
 ## Commands
 ### Precomputed hairmask
 ```bash
+cd /gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/external/HairStep
+
 CUDA_VISIBLE_DEVICES=3 python -m scripts.img2masks --root_real_imgs "/gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256"
 
 CUDA_VISIBLE_DEVICES=3 python -m scripts.img2masks --root_real_imgs "/gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/CelebA"

@@ -522,6 +522,40 @@ class BaseHairTrainer(BaseTrainer):
 
         cv2.imwrite(save_path, grid)
 
+    def save_visualizations_2(self, outputs, save_path):
+        """Save reconstructed image too"""
+        if 'img' in outputs and 'reconstructed_img' in outputs and 'masked_1st_path' in outputs:
+            outputs['overlap_image'] = outputs['img'] * 0.7 + outputs['reconstructed_img'] * 0.3
+            outputs['overlap_image_pixels'] = outputs['img'] * 0.7 +  0.3 * outputs['masked_1st_path']
+            diff_signed = outputs['reconstructed_img'] - outputs['img']
+            diff_signed = (diff_signed + 1) / 2  # [-1,1] to [0,1] for visualization
+            outputs['diff_image_signed'] = diff_signed
+        # outputs: depth are in [0, 1], strand are in [-1, 1]
+        
+        # image_keys = ['img', 'strand', 'depth', 'reconstructed_img', 'overlap_image']
+        image_keys = ['img', 'strand', 'depth', 'diff_image_signed']
+        if 'depth' in outputs:
+            depth_vis = self.depth2vis(outputs['depth'], outputs['hairmask'])
+            outputs['depth'] = depth_vis.to(outputs['depth'].device)
+        if 'strand' in outputs:     # use hsv instead
+            strand_vis = self.strand2vis(outputs['strand'])     # in [0, 1]
+            outputs['strand'] = strand_vis.to(outputs['strand'].device)
+        # print(outputs['reconstructed_img'].shape)   # B, 3, H, W
+        # print(torch.equal(outputs['reconstructed_img'], outputs['img']))        # false
+        # mae = (outputs['reconstructed_img'] - outputs['img']).abs().mean()
+        # print("MAE:", mae.item())
+
+        nrows = [1 if '2nd_path' not in key else 4 * self.config.train.Ke for key in image_keys]
+
+        grid = torch.cat([make_grid(outputs[key].detach().cpu(), nrow=nr) for key, nr in zip(image_keys, nrows) if key in outputs.keys()], dim=2)
+
+        grid = grid.permute(1,2,0).cpu().numpy()*255.0
+        grid = np.clip(grid, 0, 255)
+        grid = grid.astype(np.uint8)
+        grid = cv2.cvtColor(grid, cv2.COLOR_RGB2BGR)
+
+        cv2.imwrite(save_path, grid)
+
     def create_visualizations(self, batch, outputs):
         # batch keys are already in device, so no need to move them
         # outputs are in cpu, so we need to move them to device if we want to use them in the renderer
@@ -593,6 +627,8 @@ class BaseHairTrainer(BaseTrainer):
 
         self.config.train.freeze_encoder_in_second_path = decision_idx_second_path % 2 == 0
         self.config.train.freeze_generator_in_second_path = decision_idx_second_path % 2 == 1
+
+    
 
 
 if __name__ == "__main__":

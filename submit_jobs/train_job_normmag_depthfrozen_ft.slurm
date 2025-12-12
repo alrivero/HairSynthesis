@@ -43,7 +43,7 @@ conda activate smirk
 # Run the application
 echo "Starting computation..."
 
-CMD="python train.py configs/config_train_hs_normmag_depthfrozen.yaml"
+CMD="python train.py configs/config_train_hs_normmag_depthfrozen_ft.yaml resume='logs/smirkhair/20251203_011904_normmag_depthfrozen/model_49.pt'"
 echo "Running command:"
 echo "srun $CMD"
 srun $CMD

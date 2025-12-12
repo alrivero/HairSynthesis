@@ -6,7 +6,7 @@ K: 1 # temporal sequence length - no temporal data used here
 deterministic: False
 
 train:
-  lr: 1e-3
+  lr: 1e-5
   num_epochs: 50
   batch_size: 16 # 32
   num_workers: 4
@@ -40,7 +40,7 @@ train:
     depth_local_kernel: 3
 
   optimize_hairstrand: True
-  optimize_hairdepth: False   # If false has depth but no graph
+  optimize_hairdepth: True   # If false has depth but no graph
 
   # automatically tunable hyperparameters - just declared here
   freeze_encoder_in_second_path: False
@@ -48,7 +48,7 @@ train:
 
 # architectural details
 arch:
-  encoder_norm_strand_magnitude: False
+  encoder_norm_strand_magnitude: True
   enable_fuse_generator: True 
   depth_branch: True     # If False No depth map
 

@@ -14,6 +14,8 @@ sbatch submit_jobs/train_job_normmag_depthfrozen.slurm              # done
 sbatch submit_jobs/train_job_normmag_local_nodepth.slurm        
 sbatch submit_jobs/train_job_normmag_local_depthfrozen.slurm        # done
 
+sbatch submit_jobs/train_job_normmag_local_depthfrozen_ft.slurm        # done
+
 
 ## notes
 logs/smirkhair/20251203_010438          org                         # error
@@ -26,7 +28,7 @@ logs/smirkhair/20251203_022441          org                         # done
 logs/smirkhair/20251203_113333          normmag_local_depthfrozen   # done
 logs/smirkhair/20251203_124425          normmag_local_nodepth       # done
 
-# evaluation
+## evaluation
 ```bash
 python visualize.py "logs/smirkhair/20251127_184747_org/model_48.pt"
 
@@ -37,3 +39,9 @@ python visualize.py "logs/smirkhair/20251129_002459_normmag_local_nodepth/model_
 python visualize.py "logs/smirkhair/20251129_224026_normmag_depthfrozen/model_49.pt"
 python visualize.py "logs/smirkhair/20251129_123124_normmag_nodepth/model_49.pt"
 ```
+
+## `gen_stress.py`
+```bash
+python gen_stress.py configs/config_train_hs_normmag_depthfrozen.yaml resume='logs/smirkhair/20251203_113333_normmag_local_depthfrozen/model_49.pt'
+```
+

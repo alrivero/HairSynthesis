@@ -1,3 +1,4 @@
+from datasets.hisa_dataset import get_datasets_HiSA
 import torch
 from datasets.lrs3_dataset import get_datasets_LRS3
 from datasets.mead_dataset import get_datasets_MEAD
@@ -8,12 +9,12 @@ from datasets.mixed_dataset_sampler import MixedDatasetBatchSampler
 import os
 
 
-def load_dataloaders(config, split_file=None):
+def load_dataloaders(config, split_file=None, test_only=False):
     # ----------------------- initialize datasets ----------------------- #
     # train_dataset_LRS3, val_dataset_LRS3, test_dataset_LRS3 = get_datasets_LRS3(config)
     # train_dataset_MEAD, val_dataset_MEAD, test_dataset_MEAD = get_datasets_MEAD(config)
     # train_dataset_MEAD_sides, val_dataset_MEAD_sides, test_dataset_MEAD_sides = get_datasets_MEAD_sides(config)
-    train_dataset_ffhq, val_dataset_ffhq, _ = get_datasets_FFHQ(config, split_file)
+    train_dataset_ffhq, val_dataset_ffhq, test_dataset_ffhq = get_datasets_FFHQ(config, split_file)
     # train_dataset_celeba = get_datasets_CelebA(config)
     
     dataset_percentages = {
@@ -55,17 +56,41 @@ def load_dataloaders(config, split_file=None):
     
     # val_dataset = torch.utils.data.ConcatDataset([val_dataset_LRS3, val_dataset_MEAD])
     val_dataset = torch.utils.data.ConcatDataset([val_dataset_ffhq])
-                                             
+
+    if test_only:
+        test_dataset = torch.utils.data.ConcatDataset([test_dataset_ffhq])
+
+        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=False, collate_fn=collate_fn)
+        print("test_loader", len(test_loader))
+
     # train_loader = torch.utils.data.DataLoader(train_dataset, batch_sampler=sampler, num_workers=config.train.num_workers, collate_fn=collate_fn)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config.train.batch_size, shuffle=True, num_workers=config.train.num_workers, drop_last=False, collate_fn=collate_fn)  # TODO: change back to MixedDatasetBatchSampler, currently crash at epoch 4 so use this, but will need MixedDatasetBatchSampler for training on all datasets
     print("train_dataset", len(train_dataset))
     
     # val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=True, collate_fn=collate_fn)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=False, collate_fn=collate_fn)
+    print("val_loader", len(val_loader))
+
+    if test_only:
+        return test_loader
 
     return train_loader, val_loader
 
+def load_dataloaders_HiSA(config, split_file=None, test_only=False):
+    # ----------------------- initialize datasets ----------------------- #
+    dataset_hisa = get_datasets_HiSA(config)
+    print("dataset_hisa", len(dataset_hisa))
+    
+    def collate_fn(batch):
+        # filter none
+        batch = [b for b in batch if b is not None]
+        return torch.utils.data.dataloader.default_collate(batch)
+    
+    dataset = torch.utils.data.ConcatDataset([dataset_hisa])
 
+    loader = torch.utils.data.DataLoader(dataset, batch_size=config.train.batch_size, shuffle=True, num_workers=config.train.num_workers, drop_last=False, collate_fn=collate_fn) 
+
+    return loader
 
 
 

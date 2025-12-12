@@ -1,3 +1,4 @@
+import logging
 import sys
 from omegaconf import OmegaConf
 import torch
@@ -99,4 +100,6 @@ if __name__ == '__main__':
             trainer.save_model(trainer.state_dict(), os.path.join(config.train.log_path, 'model_{}.pt'.format(epoch)))
 
     elapsed = time.perf_counter() - start_time
-    print(f"Elapsed: {int(elapsed // 60)} min {(elapsed % 60):.2f} sec")
+    trainer.logger.info(f"Elapsed: {int(elapsed // 60)} min {(elapsed % 60):.2f} sec")
+
+    logging.shutdown()
