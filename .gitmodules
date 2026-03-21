@@ -1,0 +1,6 @@
+[submodule "external/HairStep"]
+	path = external/HairStep
+	url = https://github.com/GAP-LAB-CUHK-SZ/HairStep.git
+[submodule "external/perm"]
+	path = external/perm
+	url = https://github.com/c-he/perm.git

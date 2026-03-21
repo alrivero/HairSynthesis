@@ -3,7 +3,7 @@ import sys
 from omegaconf import OmegaConf
 import torch
 from tqdm import tqdm
-from src.smirk_trainer import SmirkHairTrainer
+from src.hair_synthesis_trainer import HairSynthesisTrainer
 import os
 from datetime import datetime
 from collections import defaultdict
@@ -44,7 +44,7 @@ if __name__ == '__main__':
     train_loader, val_loader = load_dataloaders(config)
     print("train_loader", len(train_loader), "val_loader", len(val_loader))
 
-    trainer = SmirkHairTrainer(config)
+    trainer = HairSynthesisTrainer(config)
     trainer = trainer.to(config.device)
 
     if config.resume:
@@ -55,6 +55,7 @@ if __name__ == '__main__':
     trainer.create_base_encoder()
 
     losses_hist = {'train': {}, 'val': {}, 'train_b': {}, 'val_b': {}}
+    import pdb; pdb.set_trace()
     for epoch in tqdm(range(config.train.resume_epoch, config.train.num_epochs)):
         # restart everything at each epoch!
         trainer.configure_optimizers(len(train_loader))

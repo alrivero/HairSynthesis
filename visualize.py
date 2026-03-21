@@ -4,7 +4,7 @@ import sys
 from omegaconf import OmegaConf
 import torch
 from tqdm import tqdm
-from src.smirk_trainer import SmirkHairTrainer
+from src.hair_synthesis_trainer import HairSynthesisTrainer
 import os
 from datetime import datetime
 from collections import defaultdict
@@ -46,7 +46,7 @@ if __name__ == '__main__':
     # no log for visualization
     config.train.log_path = None
 
-    trainer = SmirkHairTrainer(config)
+    trainer = HairSynthesisTrainer(config)
     trainer = trainer.to(config.device)
 
     # load trained model

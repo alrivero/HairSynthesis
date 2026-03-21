@@ -45,6 +45,7 @@ train:
   # automatically tunable hyperparameters - just declared here
   freeze_encoder_in_second_path: False
   freeze_generator_in_second_path: False
+  freeze_smirk_encoder: True
 
 # architectural details
 arch:
@@ -53,15 +54,19 @@ arch:
   depth_branch: True     # If false, no depth map
 
 # hairstep
-checkpoint_img2strand: /gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/external/HairStep/checkpoints/img2hairstep/img2strand.pth
-checkpoint_img2depth: /gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/external/HairStep/checkpoints/img2hairstep/img2depth.pth
+checkpoint_img2strand: /home/alrivero/HairStep/checkpoints/img2hairstep/img2strand.pth
+checkpoint_img2depth: /home/alrivero/HairStep/checkpoints/img2hairstep/img2depth.pth
+
+# smirk pretrain
+checkpoint_smirk: pretrained_models/SMIRK_em1.pt
+load_generator: True
 
 
 dataset:
-  FFHQ_path: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/resized_img
-  FFHQ_meta_path: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/metadata/ffhq-dataset-v2.json
-  FFHQ_hairmask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/seg
-  FFHQ_bodymask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/body_img
+  FFHQ_path: /data/add_disk3/arivero/images1024x1024/processed/hairstep/resized_img
+  FFHQ_meta_path: /data/add_disk3/arivero/ffhq-dataset-v2.json
+  FFHQ_hairmask: /data/add_disk3/arivero/images1024x1024/processed/hairstep/seg
+  FFHQ_bodymask: /data/add_disk3/arivero/images1024x1024/processed/hairstep/body_img
 
   # percentage of data to use for each dataset
   FFHQ_percentage: 1    # sampling weight when training multiple datasets

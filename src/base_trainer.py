@@ -358,10 +358,10 @@ class BaseHairTrainer(BaseTrainer):
         else:
             params = []
             if self.config.train.optimize_hairstrand:
-                params += list(self.smirk_encoder.strand_encoder.parameters()) 
+                params += list(self.hair_encoder.strand_encoder.parameters()) 
             if self.config.arch.depth_branch:
                 if self.config.train.optimize_hairdepth:
-                    params += list(self.smirk_encoder.depth_encoder.parameters())
+                    params += list(self.hair_encoder.depth_encoder.parameters())
 
             self.encoder_optimizer = torch.optim.Adam(params, lr= encoder_scale * self.config.train.lr)
                 
@@ -398,12 +398,12 @@ class BaseHairTrainer(BaseTrainer):
             self.smirk_generator_scheduler.step()
 
     def train(self):
-        self.smirk_encoder.train()
+        self.hair_encoder.train()
         if self.config.arch.enable_fuse_generator:
             self.smirk_generator.train()
     
     def eval(self):
-        self.smirk_encoder.eval()
+        self.hair_encoder.eval()
         if self.config.arch.enable_fuse_generator:
             self.smirk_generator.eval()
 
@@ -589,16 +589,16 @@ class BaseHairTrainer(BaseTrainer):
         return visualizations
 
     def save_model(self, state_dict, save_path):
-        # remove everything that is not smirk_encoder or smirk_generator
+        # remove everything that is not hair_encoder or smirk_generator
         new_state_dict = {}
         for key in list(state_dict.keys()):
-            if key.startswith('smirk_encoder') or key.startswith('smirk_generator'):
+            if key.startswith('hair_encoder') or key.startswith('smirk_generator'):
                 new_state_dict[key] = state_dict[key]
 
         torch.save(new_state_dict, save_path)
 
     def create_base_encoder(self):
-        self.base_encoder = copy.deepcopy(self.smirk_encoder)
+        self.base_encoder = copy.deepcopy(self.hair_encoder)
         self.base_encoder.eval()
         for p in self.base_encoder.parameters():
             p.requires_grad = False
@@ -609,12 +609,19 @@ class BaseHairTrainer(BaseTrainer):
         print(f'Loading checkpoint from {resume}, load_encoder={load_encoder}, load_fuse_generator={load_fuse_generator}')
 
         filtered_state_dict = {}
-        for key in loaded_state_dict.keys():
-            # new
-            if (load_encoder and key.startswith('smirk_encoder')) or (load_fuse_generator and key.startswith('smirk_generator')):
-                filtered_state_dict[key] = loaded_state_dict[key]
+        for key, value in loaded_state_dict.items():
+            if load_encoder and (key.startswith('hair_encoder') or key.startswith('smirk_encoder')):
+                if key.startswith('smirk_encoder'):
+                    new_key = key.replace('smirk_encoder', 'hair_encoder', 1)
+                    if new_key in filtered_state_dict:
+                        continue
+                else:
+                    new_key = key
+                filtered_state_dict[new_key] = value
+            if load_fuse_generator and key.startswith('smirk_generator'):
+                filtered_state_dict[key] = value
             
-        self.load_state_dict(filtered_state_dict, strict=False) # set it false because it asks for mica and other models apart from smirk_encoder and smirk_generator
+        self.load_state_dict(filtered_state_dict, strict=False) # set it false because it asks for mica and other models apart from hair_encoder and smirk_generator
 
     def set_freeze_status(self, config, batch_idx, epoch_idx):
         #self.config.train.freeze_encoder_in_first_path = False
@@ -701,5 +708,3 @@ if __name__ == "__main__":
     # plt.savefig("/gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/strand_hsv_test.png", bbox_inches="tight")
 
     
-
-

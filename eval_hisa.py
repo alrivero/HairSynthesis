@@ -11,7 +11,7 @@ from tqdm import tqdm
 from pathlib import Path
 from omegaconf import OmegaConf
 
-from src.smirk_trainer import SmirkHairTrainer
+from src.hair_synthesis_trainer import HairSynthesisTrainer
 from datasets.data_utils import load_dataloaders_HiSA
 
 
@@ -174,11 +174,11 @@ def main():
     config.train.log_path = None
 
     # Hairstep encoder trainer
-    trainer_hs = SmirkHairTrainer(config)       # encoder are loaded with pretrained weights from HairStep in init
+    trainer_hs = HairSynthesisTrainer(config)       # encoder are loaded with pretrained weights from HairStep in init
     trainer_hs = trainer_hs.to(config.device)
     trainer_hs.create_base_encoder()
 
-    trainer_curr = SmirkHairTrainer(config)
+    trainer_curr = HairSynthesisTrainer(config)
     trainer_curr = trainer_curr.to(config.device)
 
     # load trained model
@@ -200,7 +200,7 @@ def main():
             outputs = trainer_curr.step(batch, batch_idx, phase=phase)
             strand_current = outputs["strand"]      # (B, 3, H, W)
 
-            # HairStep: encoder, check smirk_encoder for outputs
+            # HairStep: encoder, check hair_encoder for outputs
             outputs_hs = trainer_hs.step(batch, batch_idx, phase=phase)
             strand_hs = outputs_hs["strand"]
 

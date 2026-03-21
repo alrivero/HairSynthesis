@@ -8,7 +8,7 @@ deterministic: False
 train:
   lr: 1e-3
   num_epochs: 50
-  batch_size: 16 # 32
+  batch_size: 8 # 32
   num_workers: 4
   log_path: logs/smirkhair
   log_append_timestamp: True
@@ -30,8 +30,7 @@ train:
     reconstruction_loss: 10.0  # RECONSTRUCTION - l1 loss weight
     strand_regularization: 1e-2
     depth_regularization: 1e-2
-    cycle_loss: 0.0  # CYCLE loss - NOT implemented
-    # cycle_loss: 1.0  # CYCLE loss
+    cycle_loss: 1.0  # CYCLE loss - NOT implemented
     strand_local_regularization: 0 #1e-4   # local smooth loss
     strand_local_kernel: 3   # local smooth loss
     strand_local_stride: 1   # local smooth loss
@@ -45,23 +44,32 @@ train:
   # automatically tunable hyperparameters - just declared here
   freeze_encoder_in_second_path: False
   freeze_generator_in_second_path: False
+  freeze_smirk_encoder: True
 
 # architectural details
 arch:
   encoder_norm_strand_magnitude: True
   enable_fuse_generator: True 
-  depth_branch: False     # No depth map
+  depth_branch: True     # No depth map
+  num_expression: 50
+  num_shape: 300
+  use_eyelids: True
 
 # hairstep
-checkpoint_img2strand: /gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/external/HairStep/checkpoints/img2hairstep/img2strand.pth
-checkpoint_img2depth: /gpfs/projects/CascanteBonillaGroup/thinguyen/storage/smirk/external/HairStep/checkpoints/img2hairstep/img2depth.pth
+checkpoint_img2strand: /home/alrivero/HairStep/checkpoints/img2hairstep/img2strand.pth
+checkpoint_img2depth: /home/alrivero/HairStep/checkpoints/img2hairstep/img2depth.pth
 
+# smirk pretrain
+checkpoint_smirk: pretrained_models/SMIRK_em1.pt
+load_generator: False
 
 dataset:
-  FFHQ_path: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/resized_img
-  FFHQ_meta_path: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/metadata/ffhq-dataset-v2.json
-  FFHQ_hairmask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/seg
-  FFHQ_bodymask: /gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/body_img
+  resolution: 512
+
+  FFHQ_path: /data/add_disk3/arivero/images1024x1024/images
+  FFHQ_meta_path: /data/add_disk3/arivero/ffhq-dataset-v2.json
+  FFHQ_hairmask: /data/add_disk3/arivero/images1024x1024/processed/hairstep/seg
+  FFHQ_bodymask: /data/add_disk3/arivero/images1024x1024/processed/hairstep/body_img
 
   # percentage of data to use for each dataset
   FFHQ_percentage: 1    # sampling weight when training multiple datasets

@@ -52,7 +52,7 @@ if __name__ == '__main__':
         smirk_generator = SmirkGenerator(in_channels=6, out_channels=3, init_features=32, res_blocks=5).to(args.device)
 
         checkpoint_generator = {k.replace('smirk_generator.', ''): v for k, v in checkpoint.items() if 'smirk_generator' in k} # checkpoint includes both smirk_encoder and smirk_generator
-        smirk_generator.load_state_dict(checkpoint_generator)
+        smirk_generator.load_state_dict(checkpoint_generator, strict=False)
         smirk_generator.eval()
 
     out_path = Path(args.checkpoint).parent / 'vis' / 'strand'
@@ -209,4 +209,3 @@ if __name__ == '__main__':
         # image_name = args.input_path.split('/')[-1]
 
         # cv2.imwrite(f"{args.out_path}/{image_name}", grid_numpy)
-

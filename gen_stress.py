@@ -16,7 +16,7 @@ from tqdm import tqdm
 from pathlib import Path
 from omegaconf import OmegaConf
 from collections import defaultdict
-from src.smirk_trainer import SmirkHairTrainer
+from src.hair_synthesis_trainer import HairSynthesisTrainer
 from datasets.data_utils import load_dataloaders
 
 from torchvision import transforms
@@ -116,7 +116,7 @@ def main():
     # turn off log during testing
     config.train.log_path = None
 
-    trainer = SmirkHairTrainer(config)
+    trainer = HairSynthesisTrainer(config)
     trainer = trainer.to(config.device)
 
     # setup output directory

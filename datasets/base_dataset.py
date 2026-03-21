@@ -4,6 +4,7 @@ import albumentations as A
 import numpy as np
 from skimage import transform as trans
 import cv2
+from collections import abc
 
 
 def create_mask(landmarks, shape):
@@ -221,6 +222,7 @@ class BaseHairDataset(BaseDataset):
         self.config = config
         # self.image_size = config.image_size
         self.test = test
+        self.target_resolution = self._resolve_target_resolution(config)
 
         # if not self.test:
         #     self.scale = [config.train.train_scale_min, config.train.train_scale_max] 
@@ -248,6 +250,9 @@ class BaseHairDataset(BaseDataset):
         return data_dict
 
     def prepare_data(self, image, hairmask, bodymask):
+        image = self._resize_image(image)
+        hairmask = self._resize_mask(hairmask)
+        bodymask = self._resize_mask(bodymask)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         # augment
@@ -272,4 +277,67 @@ class BaseHairDataset(BaseDataset):
             'bodymask': bodymask
         }
         return data_dict
+
+    def _resolve_target_resolution(self, config):
+        dataset_cfg = getattr(config, 'dataset', None)
+        resolution = None
+        if dataset_cfg is not None and hasattr(dataset_cfg, 'resolution'):
+            resolution = dataset_cfg.resolution
+        if resolution is None and hasattr(config, 'image_size'):
+            resolution = config.image_size
+        return self._normalize_resolution(resolution)
+
+    def _normalize_resolution(self, resolution):
+        if resolution is None:
+            return None
+
+        # Handle mappings like {"height": 512, "width": 512}
+        if isinstance(resolution, abc.Mapping):
+            height = resolution.get('height') or resolution.get('h')
+            width = resolution.get('width') or resolution.get('w')
+        elif isinstance(resolution, abc.Sequence) and not isinstance(resolution, (str, bytes)):
+            if len(resolution) == 0:
+                return None
+            if len(resolution) == 1:
+                height = width = resolution[0]
+            else:
+                height, width = resolution[:2]
+        else:
+            height = width = resolution
+
+        if height is None or width is None:
+            return None
+
+        return int(height), int(width)
+
+    def _resize_image(self, image):
+        if self.target_resolution is None:
+            return image
+        target_h, target_w = self.target_resolution
+        h, w = image.shape[:2]
+        if (h, w) == (target_h, target_w):
+            return image
+
+        interpolation = cv2.INTER_AREA if target_h < h or target_w < w else cv2.INTER_LINEAR
+        return cv2.resize(image, (target_w, target_h), interpolation=interpolation)
+
+    def _resize_mask(self, mask):
+        if self.target_resolution is None:
+            return mask
+        target_h, target_w = self.target_resolution
+        h, w = mask.shape[:2]
+        if (h, w) == (target_h, target_w):
+            return mask
+
+        mask_3d = mask if mask.ndim == 3 else mask[..., None]
+        channels = mask_3d.shape[2]
+        resized_channels = []
+        for c in range(channels):
+            channel = mask_3d[..., c].astype(np.float32)
+            resized_channel = cv2.resize(channel, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+            resized_channels.append(resized_channel)
+        resized = np.stack(resized_channels, axis=-1)
+        if mask.ndim == 2:
+            return resized[..., 0]
+        return resized
     
