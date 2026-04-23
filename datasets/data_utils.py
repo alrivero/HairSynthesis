@@ -7,6 +7,7 @@ from datasets.ffhq_dataset import get_datasets_FFHQ
 from datasets.celeba_dataset import get_datasets_CelebA
 from datasets.mixed_dataset_sampler import MixedDatasetBatchSampler
 import os
+from datasets.config_utils import get_dataset_section
 
 
 def load_dataloaders(config, split_file=None, test_only=False):
@@ -16,11 +17,12 @@ def load_dataloaders(config, split_file=None, test_only=False):
     # train_dataset_MEAD_sides, val_dataset_MEAD_sides, test_dataset_MEAD_sides = get_datasets_MEAD_sides(config)
     train_dataset_ffhq, val_dataset_ffhq, test_dataset_ffhq = get_datasets_FFHQ(config, split_file)
     # train_dataset_celeba = get_datasets_CelebA(config)
-    
+    ffhq_cfg = get_dataset_section(config, 'FFHQ')
+
     dataset_percentages = {
         # 'LRS3': config.dataset.LRS3_percentage,
         # 'MEAD': config.dataset.MEAD_percentage,
-        'FFHQ': config.dataset.FFHQ_percentage,
+        'FFHQ': ffhq_cfg.FFHQ_percentage,
         # 'CELEBA': config.dataset.CelebA_percentage,
         # 'MEAD_sides': config.dataset.MEAD_sides_percentage
     }

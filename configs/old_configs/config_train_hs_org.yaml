@@ -19,6 +19,13 @@ train:
   visualize_every: 50   # num_batch
   mask_ratio: 0.01  # pixel to be retained inside the hair mask, ratio is over the whole image
   mask_dilation_radius: 10 # dilation of the initial hair mask
+  step2_sparse_color:
+    tangent_radius: 18
+    normal_radius: 6
+    fallback_radius: 24
+    candidate_pool: 8
+    use_hair_mask_union: False
+    fill_inverse_intersection_samples: False
   save_every: 10 # save model every n epochs
   use_wandb: False
   Ke: 1 # number of repeated frames for 2nd cycle path

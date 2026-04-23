@@ -245,7 +245,7 @@ class FlamePermBridge(nn.Module):
         template_vertices = self.flame.v_template.unsqueeze(0).expand(batch_size, -1, -1)
 
         # Run linear blend skinning with the zeroed root pose and remaining joint rotations.
-        verts, joints = lbs(
+        verts, joints, _, _ = lbs(
             betas=betas,
             pose=torch.cat([pose_no_rigid, neck_pose_params, jaw_params, eye_pose_params], dim=1),
             v_template=template_vertices,

@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 from torchvision.utils import make_grid
 import cv2
+import math
 import os
 import random
 import copy
@@ -334,49 +335,237 @@ class BaseHairTrainer(BaseTrainer):
         val_losses = losses_hist['val']
         # print("plot_losses", train_losses)
 
-        losses_name = list(train_losses.keys())
+        losses_name = sorted(set(train_losses.keys()) | set(val_losses.keys()))
         for ln in losses_name:
-            self.plot_curve(train_losses[ln], val_losses[ln], 'losses', ln, os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}.png"))
+            train_curve = train_losses.get(ln)
+            val_curve = val_losses.get(ln)
+            plot_path = os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}.png")
+
+            if train_curve is not None and val_curve is not None:
+                self.plot_curve(train_curve, val_curve, 'losses', ln, plot_path)
+            elif train_curve is not None:
+                self.plot_curve_single(train_curve, 'train', 'losses', ln, plot_path)
+            elif val_curve is not None:
+                self.plot_curve_single(val_curve, 'val', 'losses', ln, plot_path)
             
             if plot_batch:
-                self.plot_curve_single(losses_hist['train_b'][ln], 'train', 'losses', ln, os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}_train_b.png"))
-                self.plot_curve_single(losses_hist['val_b'][ln], 'val', 'losses', ln, os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}_val_b.png"))
+                train_batch_curve = losses_hist['train_b'].get(ln)
+                val_batch_curve = losses_hist['val_b'].get(ln)
+                if train_batch_curve is not None:
+                    self.plot_curve_single(
+                        train_batch_curve,
+                        'train',
+                        'losses',
+                        ln,
+                        os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}_train_b.png"),
+                    )
+                if val_batch_curve is not None:
+                    self.plot_curve_single(
+                        val_batch_curve,
+                        'val',
+                        'losses',
+                        ln,
+                        os.path.join(self.config.train.log_path, "loss_plots", f"loss_{ln}_val_b.png"),
+                    )
 
-    def configure_optimizers(self, n_steps):
-        self.n_steps = n_steps
+    def _cfg_get(self, cfg, key, default=None):
+        if cfg is None:
+            return default
+        try:
+            if key in cfg:
+                return cfg[key]
+        except Exception:
+            pass
+        return getattr(cfg, key, default)
 
-        # start decaying at max_epochs // 2
-        # at the end of training, the lr will be 0.1 * lr
-        # lambda_func = lambda epoch: 1.0 - max(0, .1 + epoch - max_epochs//2) / float(max_epochs//2)
+    def _target_lr(self, name):
+        if name == 'encoder':
+            lr = self._cfg_get(self.config.train, 'lr_encoder', None)
+            if lr is None:
+                lr = self._cfg_get(self.config.train, 'encoder_lr', None)
+            if lr is None:
+                lr = 0.25 * float(self._cfg_get(self.config.train, 'lr'))
+            return float(lr)
+        if name == 'generator':
+            lr = self._cfg_get(self.config.train, 'lr_generator', None)
+            if lr is None:
+                lr = self._cfg_get(self.config.train, 'generator_lr', None)
+            if lr is None:
+                lr = float(self._cfg_get(self.config.train, 'lr'))
+            return float(lr)
+        raise ValueError(f"Unknown lr target: {name}")
 
-        encoder_scale = .25
+    def _ramp_cfg(self, name):
+        lr_ramp_cfg = self._cfg_get(self.config.train, 'lr_ramp', None)
+        ramp_cfg = self._cfg_get(lr_ramp_cfg, name, None)
+        if ramp_cfg is None:
+            ramp_cfg = self._cfg_get(self.config.train, f'{name}_lr_ramp', None)
+        return ramp_cfg
+
+    def _ramp_duration_steps(self, ramp_cfg):
+        duration_steps = self._cfg_get(ramp_cfg, 'duration_steps', None)
+        if duration_steps is None:
+            duration_steps = self._cfg_get(ramp_cfg, 'duration_batches', None)
+        if duration_steps is not None:
+            return max(0, int(duration_steps))
+
+        duration_fraction = self._cfg_get(ramp_cfg, 'duration_fraction', None)
+        if duration_fraction is not None:
+            return max(0, int(round(float(duration_fraction) * max(1, int(self.n_steps)))))
+
+        # Legacy alias from the first implementation. Treat it as a step count
+        # rather than an epoch count so ramping always happens within each epoch.
+        duration_steps = self._cfg_get(ramp_cfg, 'duration_epochs', self._cfg_get(ramp_cfg, 'epochs', 0))
+        return max(0, int(duration_steps))
+
+    def _encoder_decay_lr(self, step_idx=0):
+        base_lr = self._target_lr('encoder')
+        eta_min = 0.01 * base_lr
+        t_max = max(1, int(self.n_steps))
+        t_cur = min(max(int(step_idx), 0), t_max)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * float(t_cur) / float(t_max)))
+        return eta_min + (base_lr - eta_min) * cosine
+
+    def _encoder_ramp_active(self, epoch_idx=None):
+        ramp_cfg = self._ramp_cfg('encoder')
+        if ramp_cfg is None or not bool(self._cfg_get(ramp_cfg, 'enabled', False)):
+            return False
+
+        epoch_idx = int(epoch_idx if epoch_idx is not None else getattr(self, 'current_epoch_idx', 0) or 0)
+        start_epoch = int(self._cfg_get(ramp_cfg, 'start_epoch', 0))
+        return epoch_idx >= start_epoch
+
+    def _encoder_ramp_factor(self, step_idx=0, epoch_idx=None):
+        ramp_cfg = self._ramp_cfg('encoder')
+        if not self._encoder_ramp_active(epoch_idx):
+            return 1.0
+
+        target_lr = self._target_lr('encoder')
+        end_factor = float(self._cfg_get(ramp_cfg, 'end_factor', 1.0))
+
+        start_lr = self._cfg_get(ramp_cfg, 'start_lr', None)
+        if start_lr is not None and target_lr > 0:
+            start_factor = float(start_lr) / target_lr
+        else:
+            start_factor = float(self._cfg_get(ramp_cfg, 'start_factor', 0.0))
+
+        if (
+            bool(self._cfg_get(ramp_cfg, 'inverse_to_generator_decay', False))
+            and self.config.arch.enable_fuse_generator
+            and hasattr(self, 'smirk_generator_optimizer')
+        ):
+            gen_base_lr = self._target_lr('generator')
+            gen_min_lr = 0.01 * gen_base_lr
+            gen_lr = self.smirk_generator_optimizer.param_groups[0]['lr']
+            denom = max(gen_base_lr - gen_min_lr, 1e-12)
+            progress = (gen_base_lr - gen_lr) / denom
+            progress = min(max(float(progress), 0.0), 1.0)
+        else:
+            duration_steps = self._ramp_duration_steps(ramp_cfg)
+            if duration_steps <= 0:
+                return 1.0
+            if duration_steps <= 1:
+                progress = 1.0
+            else:
+                progress = min(max(float(step_idx), 0.0) / float(duration_steps - 1), 1.0)
+
+        return start_factor + progress * (end_factor - start_factor)
+
+    def _encoder_scheduled_lr(self, step_idx=0, epoch_idx=None):
+        if self._encoder_ramp_active(epoch_idx):
+            return self._target_lr('encoder') * self._encoder_ramp_factor(step_idx, epoch_idx)
+        return self._encoder_decay_lr(step_idx)
+
+    def _set_optimizer_lr(self, optimizer, lr):
+        for group in optimizer.param_groups:
+            group['lr'] = lr
+
+    def _apply_encoder_scheduled_lr(self):
+        step_idx = getattr(self, '_lr_step_idx', 0)
+        epoch_idx = getattr(self, 'current_epoch_idx', None)
+        self._set_optimizer_lr(self.encoder_optimizer, self._encoder_scheduled_lr(step_idx, epoch_idx))
+
+    def _has_gradient_clipping_config(self):
+        return (
+            self._cfg_get(self.config.train, 'gradient_clipping', None) is not None
+            or self._cfg_get(self.config.train, 'clip_gradients', None) is not None
+        )
+
+    def _clip_gradients(self, *, clip_encoder=True, clip_generator=True):
+        clip_cfg = self._cfg_get(self.config.train, 'gradient_clipping', None)
+        if clip_cfg is None:
+            enabled = bool(self._cfg_get(self.config.train, 'clip_gradients', False))
+            max_norm = self._cfg_get(self.config.train, 'clip_grad_norm', None)
+            clip_cfg = {
+                'enabled': enabled,
+                'encoder_max_norm': max_norm,
+                'generator_max_norm': max_norm,
+                'norm_type': 2.0,
+            }
+
+        if not bool(self._cfg_get(clip_cfg, 'enabled', False)):
+            return False
+
+        norm_type = float(self._cfg_get(clip_cfg, 'norm_type', 2.0))
+
+        if clip_encoder:
+            max_norm = self._cfg_get(
+                clip_cfg,
+                'encoder_max_norm',
+                self._cfg_get(clip_cfg, 'max_norm', None),
+            )
+            if max_norm is not None and float(max_norm) > 0:
+                params = [p for p in self.hair_encoder.parameters() if p.requires_grad and p.grad is not None]
+                if params:
+                    torch.nn.utils.clip_grad_norm_(params, float(max_norm), norm_type=norm_type)
+
+        if clip_generator and self.config.arch.enable_fuse_generator:
+            max_norm = self._cfg_get(
+                clip_cfg,
+                'generator_max_norm',
+                self._cfg_get(clip_cfg, 'max_norm', None),
+            )
+            if max_norm is not None and float(max_norm) > 0:
+                params = [p for p in self.smirk_generator.parameters() if p.requires_grad and p.grad is not None]
+                if params:
+                    torch.nn.utils.clip_grad_norm_(params, float(max_norm), norm_type=norm_type)
+
+        return True
+
+    def configure_optimizers(self, n_steps, epoch_idx=None):
+        self.n_steps = max(1, int(n_steps))
+        self.current_epoch_idx = epoch_idx
+        self._lr_step_idx = 0
+        generator_lr = self._target_lr('generator')
+
+        if self.config.arch.enable_fuse_generator:
+            if hasattr(self, 'smirk_generator_optimizer'):
+                self._set_optimizer_lr(self.smirk_generator_optimizer, generator_lr)
+            else:
+                self.smirk_generator_optimizer = torch.optim.Adam(self.smirk_generator.parameters(), lr=generator_lr, betas=(0.5, 0.999))
+            self.smirk_generator_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.smirk_generator_optimizer,
+                T_max=self.n_steps,
+                eta_min=0.01 * generator_lr,
+            )
+
+        encoder_lr = self._encoder_scheduled_lr(0, epoch_idx)
 
         # check if self.encoder_optimizer exists
         if hasattr(self, 'encoder_optimizer'):
-            for g in self.encoder_optimizer.param_groups:
-                g['lr'] = encoder_scale * self.config.train.lr
+            self._set_optimizer_lr(self.encoder_optimizer, encoder_lr)
         else:
             params = []
-            if self.config.train.optimize_hairstrand:
-                params += list(self.hair_encoder.strand_encoder.parameters()) 
+            optimize_strand = getattr(self.config.train, 'optimize_strand', None)
+            if optimize_strand is None:
+                optimize_strand = getattr(self.config.train, 'optimize_hairstrand', True)
+            if optimize_strand:
+                params += list(self.hair_encoder.strand_encoder.parameters())
             if self.config.arch.depth_branch:
                 if self.config.train.optimize_hairdepth:
                     params += list(self.hair_encoder.depth_encoder.parameters())
 
-            self.encoder_optimizer = torch.optim.Adam(params, lr= encoder_scale * self.config.train.lr)
-                
-        # cosine schedulers for both optimizers - per iterations
-        self.encoder_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.encoder_optimizer, T_max=n_steps, eta_min=0.01 * encoder_scale * self.config.train.lr)
-
-        if self.config.arch.enable_fuse_generator:
-            if hasattr(self, 'fuse_generator_optimizer'):
-                for g in self.smirk_generator_optimizer.param_groups:
-                    g['lr'] = self.config.train.lr
-            else:
-                self.smirk_generator_optimizer = torch.optim.Adam(self.smirk_generator.parameters(), lr= self.config.train.lr, betas=(0.5, 0.999))
-
-            
-            self.smirk_generator_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.smirk_generator_optimizer, T_max=n_steps, eta_min=0.01 * self.config.train.lr)
+            self.encoder_optimizer = torch.optim.Adam(params, lr=encoder_lr)
         
     def load_random_template(self, num_expressions=50):
         random_key = random.choice(list(self.templates.keys()))
@@ -393,9 +582,10 @@ class BaseHairTrainer(BaseTrainer):
             param.requires_grad_(False)
         
     def scheduler_step(self):
-        self.encoder_scheduler.step()
         if self.config.arch.enable_fuse_generator:
             self.smirk_generator_scheduler.step()
+        self._lr_step_idx = min(getattr(self, '_lr_step_idx', 0) + 1, int(self.n_steps))
+        self._apply_encoder_scheduled_lr()
 
     def train(self):
         self.hair_encoder.train()
@@ -487,8 +677,9 @@ class BaseHairTrainer(BaseTrainer):
 
             rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB) / 255.0       # convert to [0, 1] bc save_visualization assume this as input
 
-            # apply hair mask
-            mask = (strand_map[0] > 0.75).astype(np.float32)
+            # Recover hair support from HairStep's convention:
+            # background=0, body/face=0.5, hair=1.
+            mask = np.clip((strand_map[0] - 0.5) * 2.0, 0.0, 1.0).astype(np.float32)
             rgb = (rgb * mask[...,None])       # (H, W, C)
             vis_b = torch.from_numpy(rgb).permute(2,0,1)      # (C, H, W)
             
@@ -497,23 +688,68 @@ class BaseHairTrainer(BaseTrainer):
         return torch.stack(strand_vis, dim=0)
 
     def save_visualizations(self, outputs, save_path):
-        if 'img' in outputs and 'rendered_img' in outputs and 'masked_1st_path' in outputs:
-            # TODO: overlap generated img with original
-            outputs['overlap_image'] = outputs['img'] * 0.7 + outputs['rendered_img'] * 0.3
-            outputs['overlap_image_pixels'] = outputs['img'] * 0.7 +  0.3 * outputs['masked_1st_path']
-        # outputs: depth are in [0, 1], strand are in [-1, 1]
-        
-        image_keys = ['img', 'strand', 'depth']
-        if 'depth' in outputs:
-            depth_vis = self.depth2vis(outputs['depth'], outputs['hairmask'])
-            outputs['depth'] = depth_vis.to(outputs['depth'].device)
-        if 'strand' in outputs:     # use hsv instead
-            strand_vis = self.strand2vis(outputs['strand'])     # in [0, 1]
-            outputs['strand'] = strand_vis.to(outputs['strand'].device)
+        image_keys = [
+            'img',
+            'strand',
+            'depth',
+            'flame_mesh_render',
+            'flame_mesh_overlay',
+            'sparse_pixel_map',
+            'translator_image_render',
+            'injected_orient',
+            'injected_depth',
+            'injected_mask',
+            'injected_inverse_intersection_mask',
+            'injected_sparse_pixel_map',
+            'cycle_translator_render',
+            'cycle_encoded_orient',
+            'cycle_encoded_depth',
+        ]
 
-        nrows = [1 if '2nd_path' not in key else 4 * self.config.train.Ke for key in image_keys]
+        depth_mask_map = {
+            'depth': 'hairmask',
+            'injected_depth': 'injected_mask',
+            'cycle_encoded_depth': 'injected_mask',
+        }
+        orient_keys = {'strand', 'injected_orient', 'cycle_encoded_orient'}
+        depth_keys = set(depth_mask_map.keys())
+        mask_keys = {'injected_mask', 'injected_inverse_intersection_mask'}
 
-        grid = torch.cat([make_grid(outputs[key].detach().cpu(), nrow=nr) for key, nr in zip(image_keys, nrows) if key in outputs.keys()], dim=2)
+        prepared = []
+        for key in image_keys:
+            if key not in outputs:
+                continue
+
+            tensor = outputs[key].detach().cpu()
+            if tensor.ndim == 3:
+                tensor = tensor.unsqueeze(0)
+
+            if key in orient_keys:
+                tensor = self.strand2vis(tensor)
+            elif key in depth_keys:
+                mask_key = depth_mask_map[key]
+                mask = outputs.get(mask_key)
+                if mask is None:
+                    mask = torch.ones_like(tensor[:, :1])
+                else:
+                    mask = mask.detach().cpu()
+                    if mask.ndim == 3:
+                        mask = mask.unsqueeze(0)
+                tensor = self.depth2vis(tensor, mask)
+            elif key in mask_keys:
+                if tensor.shape[1] == 1:
+                    tensor = tensor.repeat(1, 3, 1, 1)
+                else:
+                    tensor = tensor[:, :3]
+            else:
+                tensor = tensor.clamp(0.0, 1.0)
+
+            prepared.append(make_grid(tensor, nrow=1))
+
+        if not prepared:
+            return
+
+        grid = torch.cat(prepared, dim=2)
 
         grid = grid.permute(1,2,0).cpu().numpy()*255.0
         grid = np.clip(grid, 0, 255)
@@ -562,29 +798,46 @@ class BaseHairTrainer(BaseTrainer):
 
         visualizations = {}
         visualizations['img'] = batch['img']
-        visualizations['hairmask'] = batch['hairmask']
+        visualizations['hairmask'] = batch.get('encoder_hairmask', batch['hairmask'])
         visualizations['strand'] = outputs['strand']
         if self.config.arch.depth_branch:
             visualizations['depth'] = outputs['depth']
-        # visualizations['rendered_img'] = outputs['rendered_img']
+        if 'flame_render_image' in outputs:
+            visualizations['flame_mesh_render'] = outputs['flame_render_image']
+            visualizations['flame_mesh_overlay'] = (
+                batch['img'].detach().cpu() * 0.65 + outputs['flame_render_image'].detach().cpu() * 0.35
+            ).clamp(0.0, 1.0)
 
-        # 2. Base model
-        base_output = self.base_encoder(batch['img'], batch['hairmask'], batch['bodymask'])
-        visualizations['strand_base'] = base_output['strand_params']
-        if self.config.arch.depth_branch:
-            visualizations['depth_base'] = base_output['depth_params']
-    
         if self.config.arch.enable_fuse_generator:
-            visualizations['reconstructed_img'] = outputs['reconstructed_img']
-            visualizations['masked_1st_path'] = outputs['masked_1st_path']
-            visualizations['loss_img'] = outputs['loss_img']
+            if 'reconstructed_img' in outputs:
+                visualizations['translator_image_render'] = outputs['reconstructed_img']
+            if 'masked_1st_path' in outputs:
+                visualizations['sparse_pixel_map'] = outputs['masked_1st_path']
+
+        if 'hair_render_image' in outputs:
+            visualizations['injected_mask'] = outputs['hair_render_image'][:, :1]
+            visualizations['injected_orient'] = outputs['hair_render_image'][:, :3]
+            if outputs['hair_render_image'].shape[1] >= 4:
+                visualizations['injected_depth'] = outputs['hair_render_image'][:, 3:4]
+        if 'hair_render_inverse_intersection_mask' in outputs:
+            visualizations['injected_inverse_intersection_mask'] = outputs['hair_render_inverse_intersection_mask']
+        if 'hair_render_sparse_color_map' in outputs:
+            visualizations['injected_sparse_pixel_map'] = outputs['hair_render_sparse_color_map']
+        if 'hair_cycle_reconstruction' in outputs:
+            visualizations['cycle_translator_render'] = outputs['hair_cycle_reconstruction']
+        if 'hair_cycle_strand' in outputs:
+            cycle_mask = outputs['hair_cycle_strand'][:, :1]
+            if 'injected_mask' in visualizations:
+                cycle_mask = visualizations['injected_mask']
+            visualizations['cycle_encoded_orient'] = torch.cat(
+                [cycle_mask, outputs['hair_cycle_strand'][:, 1:3]],
+                dim=1,
+            )
+        if 'hair_cycle_depth' in outputs:
+            visualizations['cycle_encoded_depth'] = outputs['hair_cycle_depth']
 
         for key in visualizations.keys():
             visualizations[key] = visualizations[key].detach().cpu()
-
-        if self.config.train.loss_weights['cycle_loss'] > 0:
-            if '2nd_path' in outputs:
-                visualizations['2nd_path'] = outputs['2nd_path']
 
         return visualizations
 

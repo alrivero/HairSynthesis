@@ -187,7 +187,7 @@ def mesh_based_mask_uniform_faces(flame_trans_verts, flame_faces, face_probabili
 
 def mask_uniform_hair(hair_mask, mask_ratio=0.1):
     """
-    Samples points from the hair based on the mask ratio.
+    Samples points from the hair matte based on the mask ratio.
 
     hair_mask: (B, 1, H, W)
     """
@@ -200,14 +200,14 @@ def mask_uniform_hair(hair_mask, mask_ratio=0.1):
     # sampling per image in the batch
     samples = []
     for b in range(batch_size):
-        mask_b = hair_mask[b, 0]    # H, W
+        weights = hair_mask[b, 0].reshape(-1).clamp_min(0.0)
+        if float(weights.sum().item()) <= 1e-8:
+            weights = torch.ones_like(weights)
+        idx = torch.multinomial(weights, num_points_to_sample, replacement=True)
+        ys = idx // w
+        xs = idx % w
 
-        # print("hair_mask", hair_mask.shape)
-        # print((torch.where(hair_mask > 0)).shape)
-        ys, xs = torch.where(mask_b > 0)
-        idx = torch.randint(0, len(xs), (num_points_to_sample,), device=device)
-
-        sample_b = torch.stack([xs[idx], ys[idx]], dim=1).unsqueeze(0)      # (1, N, 2)
+        sample_b = torch.stack([xs, ys], dim=1).unsqueeze(0)      # (1, N, 2)
         samples.append(sample_b)
 
     return torch.cat(samples, dim=0)    # (B, N, 2)
@@ -215,7 +215,7 @@ def mask_uniform_hair(hair_mask, mask_ratio=0.1):
 
 # if __name__ == "__main__":
 #     hairmask_file = "/gpfs/projects/CascanteBonillaGroup/thinguyen/datasets/FFHQ256/processed/hairstep/seg/00000.png"
-#     hairmask_img = (imageio.imread(hairmask_file)/255.>0.5)[:,:,None]
+#     hairmask_img = (imageio.imread(hairmask_file) / 255.)[:, :, None]
 #     hairmask_img = torch.from_numpy(hairmask_img).permute(2, 0, 1).unsqueeze(0)
 
 #     samples = mask_uniform_hair(hairmask_img)
@@ -224,4 +224,3 @@ def mask_uniform_hair(hair_mask, mask_ratio=0.1):
 #     hairmask_cp = hairmask_img.copy()
 #     for p in samples[0]:
 #         y, x
-

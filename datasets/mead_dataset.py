@@ -5,6 +5,7 @@ import datasets.data_utils as data_utils
 from datasets.base_dataset import BaseDataset
 import numpy as np
 import cv2
+from datasets.config_utils import get_dataset_section
 
 class MEADDataset(BaseDataset):
     def __init__(self, data_list, config, test=False):
@@ -60,7 +61,8 @@ class MEADDataset(BaseDataset):
 
 def get_datasets_MEAD(config=None):
     # Assuming you're currently in the directory where the files are located
-    files = [f for f in os.listdir(config.dataset.MEAD_fan_landmarks_path)]
+    mead_cfg = get_dataset_section(config, 'MEAD')
+    files = [f for f in os.listdir(mead_cfg.MEAD_fan_landmarks_path)]
 
     # this is the split used in the paper, randomly selected
     train_subjects = ['M003', 'M007', 'M009', 'M011', 'M012', 'M019', 'M024', 'M025', 'M026', 'M027', 'M029', 'M030', 'M031', 'M032', 'M033', 'M034', 'M035', 'M037', 'M039', 'M040', 'M041', 'W009', 'W011', 'W014', 'W015', 'W016', 'W019', 'W021', 'W023', 'W024', 'W025', 'W026', 'W035', 'W036', 'W037', 'W038', 'W040']
@@ -75,27 +77,26 @@ def get_datasets_MEAD(config=None):
     train_list = []
     for file in files:
         if file.split('_')[0] in train_subjects:
-            landmarks_path = os.path.join(config.dataset.MEAD_fan_landmarks_path, file.split(".")[0] + ".pkl")
-            folder_path = os.path.join(config.dataset.MEAD_path,file.split(".")[0]+".mp4")
-            mediapipe_landmarks_path = os.path.join(config.dataset.MEAD_mediapipe_landmarks_path, file.split(".")[0] + ".npy")
+            landmarks_path = os.path.join(mead_cfg.MEAD_fan_landmarks_path, file.split(".")[0] + ".pkl")
+            folder_path = os.path.join(mead_cfg.MEAD_path,file.split(".")[0]+".mp4")
+            mediapipe_landmarks_path = os.path.join(mead_cfg.MEAD_mediapipe_landmarks_path, file.split(".")[0] + ".npy")
             train_list.append([folder_path, landmarks_path, mediapipe_landmarks_path, file.split('_')[0]])
 
     val_list = []
     for file in files:
         if file.split('_')[0] in val_subjects:
-            landmarks_path = os.path.join(config.dataset.MEAD_fan_landmarks_path, file.split(".")[0] + ".pkl")
-            folder_path = os.path.join(config.dataset.MEAD_path,file.split(".")[0]+".mp4")
-            mediapipe_landmarks_path = os.path.join(config.dataset.MEAD_mediapipe_landmarks_path, file.split(".")[0] + ".npy")
+            landmarks_path = os.path.join(mead_cfg.MEAD_fan_landmarks_path, file.split(".")[0] + ".pkl")
+            folder_path = os.path.join(mead_cfg.MEAD_path,file.split(".")[0]+".mp4")
+            mediapipe_landmarks_path = os.path.join(mead_cfg.MEAD_mediapipe_landmarks_path, file.split(".")[0] + ".npy")
             val_list.append([folder_path, landmarks_path, mediapipe_landmarks_path, file.split('_')[0]])
 
     test_list = []
     for file in files:
         if file.split('_')[0] in test_subjects:
-            landmarks_path = os.path.join(config.dataset.MEAD_fan_landmarks_path, file.split(".")[0] + ".pkl")
-            folder_path = os.path.join(config.dataset.MEAD_path,file.split(".")[0]+".mp4")
-            mediapipe_landmarks_path = os.path.join(config.dataset.MEAD_mediapipe_landmarks_path, file.split(".")[0] + ".npy")
+            landmarks_path = os.path.join(mead_cfg.MEAD_fan_landmarks_path, file.split(".")[0] + ".pkl")
+            folder_path = os.path.join(mead_cfg.MEAD_path,file.split(".")[0]+".mp4")
+            mediapipe_landmarks_path = os.path.join(mead_cfg.MEAD_mediapipe_landmarks_path, file.split(".")[0] + ".npy")
             test_list.append([folder_path, landmarks_path, mediapipe_landmarks_path, file.split('_')[0]])
 
 
     return MEADDataset(train_list, config), MEADDataset(val_list, config, test=True), MEADDataset(test_list, config, test=True) #, train_list, val_list, test_list
-

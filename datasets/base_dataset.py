@@ -27,6 +27,142 @@ mediapipe_indices = [276, 282, 283, 285, 293, 295, 296, 300, 334, 336,  46,  52,
        415]
 
 
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    try:
+        if key in cfg:
+            return cfg[key]
+    except Exception:
+        pass
+    return getattr(cfg, key, default)
+
+
+def _cfg_enabled(cfg, default=True):
+    return bool(_cfg_get(cfg, 'enabled', default))
+
+
+def _as_tuple(value):
+    if isinstance(value, abc.Sequence) and not isinstance(value, (str, bytes)):
+        return tuple(value)
+    return value
+
+
+def _append_if_enabled(transforms, cfg, default_p, factory):
+    p = float(_cfg_get(cfg, 'p', default_p))
+    if not _cfg_enabled(cfg, p > 0.0) or p <= 0.0:
+        return
+    transforms.append(factory(cfg, p))
+
+
+def build_color_augmentation(config):
+    train_cfg = getattr(config, 'train', None)
+    color_cfg = _cfg_get(train_cfg, 'color_augmentation', None)
+
+    # Preserve the previous hard-coded augmentation behavior for configs that
+    # do not declare train.color_augmentation.
+    if color_cfg is None:
+        return [
+            A.RandomBrightnessContrast(p=0.5),
+            A.RandomGamma(p=0.5),
+            A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
+            A.CLAHE(p=0.255),
+            A.RGBShift(p=0.25),
+            A.Blur(p=0.1),
+            A.GaussNoise(p=0.5),
+        ]
+
+    if not _cfg_enabled(color_cfg, True):
+        return []
+
+    transforms = []
+
+    rbc_cfg = _cfg_get(color_cfg, 'random_brightness_contrast', None)
+    _append_if_enabled(
+        transforms,
+        rbc_cfg,
+        0.8,
+        lambda cfg, p: A.RandomBrightnessContrast(
+            brightness_limit=_cfg_get(cfg, 'brightness_limit', 0.2),
+            contrast_limit=_cfg_get(cfg, 'contrast_limit', 0.2),
+            p=p,
+        ),
+    )
+
+    gamma_cfg = _cfg_get(color_cfg, 'gamma', None)
+    _append_if_enabled(
+        transforms,
+        gamma_cfg,
+        0.4,
+        lambda cfg, p: A.RandomGamma(
+            gamma_limit=_as_tuple(_cfg_get(cfg, 'gamma_limit', (80, 120))),
+            p=p,
+        ),
+    )
+
+    jitter_cfg = _cfg_get(color_cfg, 'color_jitter', None)
+    _append_if_enabled(
+        transforms,
+        jitter_cfg,
+        0.8,
+        lambda cfg, p: A.ColorJitter(
+            brightness=_cfg_get(cfg, 'brightness', 0.2),
+            contrast=_cfg_get(cfg, 'contrast', 0.2),
+            saturation=_cfg_get(cfg, 'saturation', 0.2),
+            hue=_cfg_get(cfg, 'hue', 0.05),
+            p=p,
+        ),
+    )
+
+    rgb_shift_cfg = _cfg_get(color_cfg, 'rgb_shift', None)
+    _append_if_enabled(
+        transforms,
+        rgb_shift_cfg,
+        0.5,
+        lambda cfg, p: A.RGBShift(
+            r_shift_limit=_cfg_get(cfg, 'r_shift_limit', 15),
+            g_shift_limit=_cfg_get(cfg, 'g_shift_limit', 15),
+            b_shift_limit=_cfg_get(cfg, 'b_shift_limit', 15),
+            p=p,
+        ),
+    )
+
+    clahe_cfg = _cfg_get(color_cfg, 'clahe', None)
+    _append_if_enabled(
+        transforms,
+        clahe_cfg,
+        0.0,
+        lambda cfg, p: A.CLAHE(
+            clip_limit=_cfg_get(cfg, 'clip_limit', 4.0),
+            p=p,
+        ),
+    )
+
+    blur_cfg = _cfg_get(color_cfg, 'blur', None)
+    _append_if_enabled(
+        transforms,
+        blur_cfg,
+        0.0,
+        lambda cfg, p: A.Blur(
+            blur_limit=_cfg_get(cfg, 'blur_limit', 3),
+            p=p,
+        ),
+    )
+
+    noise_cfg = _cfg_get(color_cfg, 'gauss_noise', None)
+    _append_if_enabled(
+        transforms,
+        noise_cfg,
+        0.0,
+        lambda cfg, p: A.GaussNoise(
+            var_limit=_as_tuple(_cfg_get(cfg, 'var_limit', (10.0, 50.0))),
+            p=p,
+        ),
+    )
+
+    return transforms
+
+
 class BaseDataset(torch.utils.data.Dataset):
     def __init__(self, data_list, config, test=False):
         self.data_list = data_list
@@ -220,63 +356,228 @@ class BaseHairDataset(BaseDataset):
     def __init__(self, data_list, config, test=False):
         self.data_list = data_list
         self.config = config
-        # self.image_size = config.image_size
         self.test = test
         self.target_resolution = self._resolve_target_resolution(config)
+        self.smirk_image_size = int(getattr(config, 'image_size', 224))
+        self.smirk_crop_scale = self._resolve_smirk_crop_scale(config)
 
-        # if not self.test:
-        #     self.scale = [config.train.train_scale_min, config.train.train_scale_max] 
-        # else:
-        #     self.scale = config.train.test_scale
-        
-        self.transform = A.Compose([
-                # # color ones
-                # A.RandomBrightnessContrast(p=0.5),
-                # A.RandomGamma(p=0.5),
-                # A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
-                # A.CLAHE(p=0.255),
-                # A.RGBShift(p=0.25),
-                # A.Blur(p=0.1),
-                # A.GaussNoise(p=0.5),
-                # # affine ones
-                # A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, border_mode=0, p=0.9),
-            ], additional_targets={'hairmask': 'mask', 'bodymask': 'mask'})
+        self.transform = A.Compose(build_color_augmentation(config), additional_targets={
+                'hairmask': 'mask',
+                'bodymask': 'mask',
+                'encoder_hairmask': 'mask',
+                'encoder_bodymask': 'mask',
+            })
 
     def __len__(self):
         return len(self.data_list)
 
     def __getitem__(self, index):
-        data_dict = self.__getitem_aux__(index)
-        return data_dict
+        max_attempts = max(1, min(len(self.data_list), 20))
+        for attempt in range(max_attempts):
+            try:
+                data_dict = self.__getitem_aux__(index)
+                if data_dict is not None:
+                    return data_dict
+                print(f"Invalid hair sample at index {index}. Trying again...")
+            except Exception as exc:
+                print(f"Error in loading hair data at index {index}. Trying again... {exc}")
 
-    def prepare_data(self, image, hairmask, bodymask):
+            index = np.random.randint(0, len(self.data_list))
+
+        raise RuntimeError("Failed to fetch a valid hair sample after multiple attempts.")
+
+    def prepare_data(
+        self,
+        image,
+        hairmask,
+        bodymask,
+        landmarks_mediapipe=None,
+        image_mask_mode='none',
+        image_mask=None,
+        encoder_hairmask=None,
+        encoder_bodymask=None,
+    ):
+        orig_h, orig_w = image.shape[:2]
         image = self._resize_image(image)
-        hairmask = self._resize_mask(hairmask)
-        bodymask = self._resize_mask(bodymask)
+        hairmask = self._resize_soft_mask(hairmask)
+        bodymask = self._resize_soft_mask(bodymask)
+        if image_mask is not None:
+            image_mask = self._resize_soft_mask(image_mask)
+        if encoder_hairmask is None:
+            encoder_hairmask = hairmask
+        else:
+            encoder_hairmask = self._resize_soft_mask(encoder_hairmask)
+        if encoder_bodymask is None:
+            encoder_bodymask = bodymask
+        else:
+            encoder_bodymask = self._resize_soft_mask(encoder_bodymask)
+        hairmask = hairmask.astype(np.float32)
+        bodymask = bodymask.astype(np.float32)
+        if image_mask is not None:
+            image_mask = image_mask.astype(np.float32)
+        encoder_hairmask = encoder_hairmask.astype(np.float32)
+        encoder_bodymask = encoder_bodymask.astype(np.float32)
+        image = self._apply_image_mask(image, hairmask, bodymask, image_mask_mode, image_mask=image_mask)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        target_h, target_w = image.shape[:2]
 
+        resized_landmarks = None
+        if landmarks_mediapipe is not None:
+            resized_landmarks = self._resize_landmarks(landmarks_mediapipe, orig_h, orig_w, target_h, target_w)
         # augment
         if not self.test:
-            transformed = self.transform(image=image, hairmask=hairmask, bodymask=bodymask)
+            transformed = self.transform(
+                image=image,
+                hairmask=hairmask,
+                bodymask=bodymask,
+                encoder_hairmask=encoder_hairmask,
+                encoder_bodymask=encoder_bodymask,
+            )
 
             image = (transformed['image']/255.0).astype(np.float32)
             hairmask = transformed['hairmask'].astype(np.float32)
             bodymask = transformed['bodymask'].astype(np.float32)
+            encoder_hairmask = transformed['encoder_hairmask'].astype(np.float32)
+            encoder_bodymask = transformed['encoder_bodymask'].astype(np.float32)
         else: 
             image = (image/255.0).astype(np.float32)
             hairmask = hairmask.astype(np.float32)
             bodymask = bodymask.astype(np.float32)
+            encoder_hairmask = encoder_hairmask.astype(np.float32)
+            encoder_bodymask = encoder_bodymask.astype(np.float32)
+
+        smirk_data = self._prepare_smirk_data((image * 255.0).astype(np.uint8), resized_landmarks)
+
+        if float(np.asarray(hairmask, dtype=np.float32).sum()) <= 1e-6:
+            return None
         
         image = image.transpose(2,0,1)
         hairmask = hairmask.transpose(2,0,1)
         bodymask = bodymask.transpose(2,0,1)
+        encoder_hairmask = encoder_hairmask.transpose(2,0,1)
+        encoder_bodymask = encoder_bodymask.transpose(2,0,1)
 
         data_dict = {
             'img': image,
             'hairmask': hairmask,
-            'bodymask': bodymask
+            'bodymask': bodymask,
+            'encoder_hairmask': encoder_hairmask,
+            'encoder_bodymask': encoder_bodymask,
         }
+        data_dict.update(smirk_data)
         return data_dict
+
+    def _resolve_image_mask_mode(self, mask_mode):
+        if mask_mode is None:
+            return 'none'
+
+        normalized = str(mask_mode).strip().lower()
+        aliases = {
+            '': 'none',
+            'none': 'none',
+            'off': 'none',
+            'false': 'none',
+            'no': 'none',
+            'body': 'body',
+            'bodymask': 'body',
+            'body_mask': 'body',
+            'hair': 'hair',
+            'hairmask': 'hair',
+            'hair_mask': 'hair',
+        }
+        if normalized not in aliases:
+            raise ValueError(
+                f"Unsupported image mask mode '{mask_mode}'. Expected one of: none, body, hair."
+            )
+        return aliases[normalized]
+
+    def _apply_image_mask(self, image, hairmask, bodymask, mask_mode, image_mask=None):
+        resolved_mode = self._resolve_image_mask_mode(mask_mode)
+        if resolved_mode == 'none':
+            return image
+
+        if resolved_mode == 'body' and image_mask is not None:
+            mask = image_mask
+        else:
+            mask = bodymask if resolved_mode == 'body' else hairmask
+        if mask.ndim == 2:
+            mask = mask[..., None]
+        if mask.shape[:2] != image.shape[:2]:
+            mask = self._resize_soft_mask(mask)
+            if mask.shape[:2] != image.shape[:2]:
+                target_h, target_w = image.shape[:2]
+                resized_channels = []
+                for channel_idx in range(mask.shape[2]):
+                    resized_channels.append(
+                        cv2.resize(
+                            mask[..., channel_idx].astype(np.float32),
+                            (target_w, target_h),
+                            interpolation=cv2.INTER_LINEAR,
+                        )
+                    )
+                mask = np.stack(resized_channels, axis=-1)
+        original_dtype = image.dtype
+        masked = image.astype(np.float32) * mask.astype(np.float32, copy=False)
+        if np.issubdtype(original_dtype, np.integer):
+            max_value = np.iinfo(original_dtype).max
+            return np.clip(masked, 0, max_value).astype(original_dtype)
+        return masked.astype(original_dtype, copy=False)
+
+    def _resolve_smirk_crop_scale(self, config):
+        train_cfg = getattr(config, 'train', None)
+        if train_cfg is None:
+            return 1.6
+
+        if hasattr(train_cfg, 'smirk_crop_scale'):
+            return float(train_cfg.smirk_crop_scale)
+        if hasattr(train_cfg, 'test_scale'):
+            return float(train_cfg.test_scale)
+        return 1.6
+
+    def _resize_landmarks(self, landmarks, orig_h, orig_w, target_h, target_w):
+        resized = np.array(landmarks, dtype=np.float32, copy=True)
+        if resized.ndim != 2 or resized.shape[-1] < 2:
+            return None
+        resized[:, 0] *= float(target_w) / max(float(orig_w), 1.0)
+        resized[:, 1] *= float(target_h) / max(float(orig_h), 1.0)
+        return resized
+
+    def _prepare_smirk_data(self, image_rgb, landmarks_mediapipe):
+        crop_size = self.smirk_image_size
+        crop_valid = False
+        if landmarks_mediapipe is not None and landmarks_mediapipe.shape[0] > max(mediapipe_indices):
+            crop_tform = self.crop_face(image_rgb, landmarks_mediapipe[..., :2], self.smirk_crop_scale, image_size=crop_size)
+            crop_valid = True
+        else:
+            crop_tform = self._build_resize_transform(image_rgb.shape[0], image_rgb.shape[1], crop_size)
+
+        smirk_img = warp(
+            image_rgb,
+            crop_tform.inverse,
+            output_shape=(crop_size, crop_size),
+            preserve_range=True,
+        ).astype(np.uint8)
+        smirk_img = (smirk_img / 255.0).astype(np.float32).transpose(2, 0, 1)
+
+        return {
+            'smirk_img': smirk_img,
+            'smirk_crop_transform': crop_tform.params.astype(np.float32),
+            'smirk_crop_valid': np.array(float(crop_valid), dtype=np.float32),
+        }
+
+    @staticmethod
+    def _build_resize_transform(full_h, full_w, crop_size):
+        sx = float(crop_size) / max(float(full_w), 1.0)
+        sy = float(crop_size) / max(float(full_h), 1.0)
+        matrix = np.array(
+            [
+                [sx, 0.0, 0.0],
+                [0.0, sy, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        return trans.ProjectiveTransform(matrix=matrix)
 
     def _resolve_target_resolution(self, config):
         dataset_cfg = getattr(config, 'dataset', None)
@@ -334,9 +635,29 @@ class BaseHairDataset(BaseDataset):
         resized_channels = []
         for c in range(channels):
             channel = mask_3d[..., c].astype(np.float32)
-            resized_channel = cv2.resize(channel, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+            resized_channel = cv2.resize(channel, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
             resized_channels.append(resized_channel)
         resized = np.stack(resized_channels, axis=-1)
+        if mask.ndim == 2:
+            return resized[..., 0]
+        return resized
+
+    def _resize_soft_mask(self, mask):
+        if self.target_resolution is None:
+            return mask
+        target_h, target_w = self.target_resolution
+        h, w = mask.shape[:2]
+        if (h, w) == (target_h, target_w):
+            return mask
+
+        mask_3d = mask if mask.ndim == 3 else mask[..., None]
+        interpolation = cv2.INTER_AREA if target_h < h or target_w < w else cv2.INTER_LINEAR
+        resized_channels = []
+        for c in range(mask_3d.shape[2]):
+            channel = mask_3d[..., c].astype(np.float32)
+            resized_channel = cv2.resize(channel, (target_w, target_h), interpolation=interpolation)
+            resized_channels.append(resized_channel)
+        resized = np.clip(np.stack(resized_channels, axis=-1), 0.0, 1.0)
         if mask.ndim == 2:
             return resized[..., 0]
         return resized

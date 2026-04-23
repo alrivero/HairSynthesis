@@ -4,6 +4,7 @@ import datasets.data_utils as data_utils
 from datasets.base_dataset import BaseDataset
 import numpy as np
 import cv2
+from datasets.config_utils import get_dataset_section
 
 class LRS3Dataset(BaseDataset):
     def __init__(self, data_list, config, test=False):
@@ -52,11 +53,12 @@ class LRS3Dataset(BaseDataset):
 
 
 def get_datasets_LRS3(config):
+    lrs3_cfg = get_dataset_section(config, 'LRS3')
     if not os.path.exists('assets/LRS3_lists.pkl'):
         print('Creating train, validation, and test lists for LRS3... (This only happens once)')
 
         from .data_utils import create_LRS3_lists
-        create_LRS3_lists(config.dataset.LRS3_path, config.dataset.LRS3_landmarks_path)
+        create_LRS3_lists(lrs3_cfg.LRS3_path, lrs3_cfg.LRS3_landmarks_path)
 
 
     lists = pickle.load(open("assets/LRS3_lists.pkl", "rb"))
@@ -69,22 +71,23 @@ def get_datasets_LRS3(config):
 
 
 def get_LRS3_test(config):
-    test_folder_list = list(os.listdir(f"{config.dataset.LRS3_path}/test"))
+    lrs3_cfg = get_dataset_section(config, 'LRS3')
+    test_folder_list = list(os.listdir(f"{lrs3_cfg.LRS3_path}/test"))
 
 
     def gather_LRS3_split(folder_list, split="trainval"):
         list_ = []
         for folder in folder_list:
-            for file in os.listdir(os.path.join(f"{config.dataset.LRS3_path}/{split}", folder)):
+            for file in os.listdir(os.path.join(f"{lrs3_cfg.LRS3_path}/{split}", folder)):
                 if file.endswith(".txt"):
                     file_without_extension = file.split(".")[0]
                     file_inner_path = f"{split}/{folder}/{file_without_extension}"
 
-                    landmarks_filename = os.path.join(config.dataset.LRS3_landmarks_path, file_inner_path+".pkl")
+                    landmarks_filename = os.path.join(lrs3_cfg.LRS3_landmarks_path, file_inner_path+".pkl")
                     subject = folder
-                    mediapipe_landmarks_filepath = os.path.join(config.dataset.LRS3_path, file_inner_path+".npy")
+                    mediapipe_landmarks_filepath = os.path.join(lrs3_cfg.LRS3_path, file_inner_path+".npy")
 
-                    list_.append([os.path.join(config.dataset.LRS3_path, file_inner_path + ".mp4"), os.path.join(config.dataset.LRS3_landmarks_path, file_inner_path+".pkl"), 
+                    list_.append([os.path.join(lrs3_cfg.LRS3_path, file_inner_path + ".mp4"), os.path.join(lrs3_cfg.LRS3_landmarks_path, file_inner_path+".pkl"), 
                                     mediapipe_landmarks_filepath,
                                     subject])
         return list_

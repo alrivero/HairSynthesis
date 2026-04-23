@@ -2,12 +2,14 @@ import os
 from datasets.base_dataset import BaseDataset
 import numpy as np
 import cv2
+from datasets.config_utils import get_dataset_section
 
 class CelebADataset(BaseDataset):
     def __init__(self, data_list, config, test=False):
         super().__init__(data_list, config, test)
         self.keys = list(data_list.keys())
         self.name = 'CelebA'
+        self.dataset_cfg = get_dataset_section(config, 'CelebA')
 
     def __len__(self):
         return len(self.keys)
@@ -24,9 +26,9 @@ class CelebADataset(BaseDataset):
         
         k = np.random.randint(0, len(files_list))
 
-        image_filepath = os.path.join(self.config.dataset.CelebA_path, files_list[k])
-        landmarks_fan_filepath = os.path.join(self.config.dataset.CelebA_fan_landmarks_path, files_list[k].replace('.jpg','.npy'))
-        landmarks_mediapipe_filepath = os.path.join(self.config.dataset.CelebA_mediapipe_landmarks_path, files_list[k].replace('.jpg','.npy'))
+        image_filepath = os.path.join(self.dataset_cfg.CelebA_path, files_list[k])
+        landmarks_fan_filepath = os.path.join(self.dataset_cfg.CelebA_fan_landmarks_path, files_list[k].replace('.jpg','.npy'))
+        landmarks_mediapipe_filepath = os.path.join(self.dataset_cfg.CelebA_mediapipe_landmarks_path, files_list[k].replace('.jpg','.npy'))
 
         if not os.path.exists(landmarks_mediapipe_filepath):
             print('Mediapipe landmarks not found for %s'%(files_list[k]))
@@ -61,15 +63,15 @@ def get_datasets_CelebA(config=None):
 
     train_dict = {}
     num_files = 0
+    celeba_cfg = get_dataset_section(config, 'CelebA')
     for subject, file in zip(subjects, files):
         if subject not in train_dict:
             train_dict[subject] = []
 
-        if not os.path.exists(os.path.join(config.dataset.CelebA_mediapipe_landmarks_path, file.replace('.jpg','.npy').replace(".png",".npy"))):
+        if not os.path.exists(os.path.join(celeba_cfg.CelebA_mediapipe_landmarks_path, file.replace('.jpg','.npy').replace(".png",".npy"))):
             continue
 
         train_dict[subject].append(file)
         num_files += 1
 
     return CelebADataset(train_dict, config)
-

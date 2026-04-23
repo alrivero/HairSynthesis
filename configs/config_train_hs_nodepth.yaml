@@ -8,16 +8,16 @@ deterministic: False
 return_low_freq_hair: True
 
 train:
-  lr: 5e-4
-  lr_encoder: 1.2e-5
-  lr_generator: 5e-4
+  lr: 1e-3
+  lr_encoder: 1e-5
+  lr_generator: 1e-3
   lr_ramp:
     encoder:
       enabled: True
-      start_epoch: 0       # zero-indexed; first epoch where the per-epoch ramp is active
+      start_epoch: 1       # zero-indexed; first epoch where the per-epoch ramp is active
       inverse_to_generator_decay: True
       duration_fraction: 1.0  # fallback when inverse_to_generator_decay is False
-      start_factor: 0.6666
+      start_factor: 0.1
       end_factor: 1.0
     generator:
       enabled: False
@@ -28,20 +28,20 @@ train:
   encoder_batchnorm_eval: True
   gradient_clipping:
     enabled: True
-    encoder_max_norm: 0.1
-    generator_max_norm: 1.0
+    encoder_max_norm: 1.0
+    generator_max_norm: 0.1
     norm_type: 2.0
   num_epochs: 50
-  batch_size: 6 # 32
+  batch_size: 10 # 32
   num_workers: 4
   log_path: /data/add_disk3/arivero/logs
   log_append_timestamp: True
-  run_name_suffix: ""  # CLI example: train.run_name_suffix=depthfrozen -> YYYYMMDD_HHMMSS_depthfrozen
+  run_name_suffix: ""  # CLI example: train.run_name_suffix=nodepth -> YYYYMMDD_HHMMSS_nodepth
   log_losses_every: 0 # 10    # this is per # batch
   visualize_phase:
     train: True
     val: True
-  visualize_every: 75   # num_batch
+  visualize_every: 25   # num_batch
   color_augmentation:
     enabled: True
     random_brightness_contrast:
@@ -78,8 +78,8 @@ train:
     fallback_radius: 24
     candidate_pool: 8
     use_hair_mask_union: True
-    fill_inverse_intersection_samples: False
-  save_every: 1 # save model every n epochs
+    fill_inverse_intersection_samples: True
+  save_every: 2 # save model every n epochs
   wandb:
     enabled: True
     project: hair-synthesis
@@ -89,7 +89,7 @@ train:
   Ke: 1 # number of repeated frames for 2nd cycle path
   use_base_model_for_regularization: True  # use the base model for regularization - when False the regularization is wrt zero
   resume_epoch: 0
-  warmup_epochs: 0  # freeze encoder, train generator only, and skip cycle rendering for first N epochs
+  warmup_epochs: 1  # freeze encoder, train generator only, and skip cycle rendering for first N epochs
   smirk_crop_scale: 1.6
   force_closed_mouth: True
   zero_flame_expression: True
@@ -106,9 +106,9 @@ train:
     reconstruction_loss: 10.0  # RECONSTRUCTION - l1 loss weight
     strand_regularization: 0.0
     depth_regularization: 0.0
-    cycle_loss: 100.0  # overall step-2 cycle scale
+    cycle_loss: 0.0  # overall step-2 cycle scale
     cycle_orient_loss: 1.0
-    cycle_depth_loss: 1.0
+    cycle_depth_loss: 0.0
     strand_along_regularization: 0.0  # along-strand sign consistency
     strand_along_step: 1.5   # sampling offset in pixels along predicted orientation
     strand_local_regularization: 0.0   # local smooth loss
@@ -129,8 +129,8 @@ train:
 # architectural details
 arch:
   encoder_norm_strand_magnitude: True
-  enable_fuse_generator: True 
-  depth_branch: True     # No depth map
+  enable_fuse_generator: True
+  depth_branch: False     # No depth map
   num_expression: 50
   num_shape: 300
   use_eyelids: True
@@ -152,7 +152,7 @@ load_generator: False
 dataset:
   resolution: 512
 
-  FFHQ: 
+  FFHQ:
     FFHQ_path: /data/add_disk3/arivero/images1024x1024/images
     FFHQ_meta_path: /data/add_disk3/arivero/ffhq-dataset-v2.json
     FFHQ_include_list: /data/add_disk3/arivero/images1024x1024/kept_names_mask_reports.txt
@@ -169,8 +169,8 @@ dataset:
 
     # using subset of the dataset only
     FFHQ_percentage_subset: 1 # include list already selects usable images
-  
+
   Hair20k:
     blenshape_path: assets/blend-shapes/strands-blend-shapes.npz
-    Hair20k_path: /data/add_disk1/alrivero/neural-textures/high-res
+    Hair20k_path: /data/add_disk4/alrivero/neural-textures/high-res
     load_roots: True

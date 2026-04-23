@@ -276,10 +276,11 @@ class FLAME(nn.Module):
 
         template_vertices = self.v_template.unsqueeze(0).expand(batch_size, -1, -1)
 
-        vertices, _ = lbs(betas, full_pose, template_vertices,
-                          self.shapedirs, self.posedirs,
-                          self.J_regressor, self.parents,
-                          self.lbs_weights, dtype=self.dtype)
+        vertices, _, joint_transforms, canonical_vertices = lbs(
+            betas, full_pose, template_vertices,
+            self.shapedirs, self.posedirs,
+            self.J_regressor, self.parents,
+            self.lbs_weights, dtype=self.dtype)
 
         if eyelid_params is not None:
             vertices = vertices + self.r_eyelid.expand(batch_size, -1, -1) * eyelid_params[:, 1:2, None]
@@ -308,10 +309,11 @@ class FLAME(nn.Module):
                                        self.mp_lmk_bary_coords.repeat(vertices.shape[0], 1, 1))
 
         return {
-            'vertices': vertices, 
-            'landmarks_fan': landmarks2d, 
-            'landmarks_fan_3d': landmarks3d, 
-            'landmarks_mp': landmarksmp
+            'vertices': vertices,
+            'landmarks_fan': landmarks2d,
+            'landmarks_fan_3d': landmarks3d,
+            'landmarks_mp': landmarksmp,
+            'canonical_vertices': canonical_vertices,
+            'joint_transforms': joint_transforms,
         }
-
 
