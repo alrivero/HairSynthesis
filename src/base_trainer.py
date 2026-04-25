@@ -556,12 +556,16 @@ class BaseHairTrainer(BaseTrainer):
             self._set_optimizer_lr(self.encoder_optimizer, encoder_lr)
         else:
             params = []
+            encoder_mode = getattr(self.config.arch, 'encoder_mode', 'hairstep_maps')
             optimize_strand = getattr(self.config.train, 'optimize_strand', None)
             if optimize_strand is None:
                 optimize_strand = getattr(self.config.train, 'optimize_hairstrand', True)
             if optimize_strand:
-                params += list(self.hair_encoder.strand_encoder.parameters())
-            if self.config.arch.depth_branch:
+                if encoder_mode == 'perm_latent':
+                    params += list(self.hair_encoder.parameters())
+                else:
+                    params += list(self.hair_encoder.strand_encoder.parameters())
+            if encoder_mode != 'perm_latent' and self.config.arch.depth_branch:
                 if self.config.train.optimize_hairdepth:
                     params += list(self.hair_encoder.depth_encoder.parameters())
 
@@ -619,9 +623,21 @@ class BaseHairTrainer(BaseTrainer):
         for b in range(B):
             depth_b = depth_np[b, 0]    # (H, W)
             mask_b = mask_np[b, 0]      # (H, W)
+            valid_mask = mask_b > 0.5
+            valid_depth = depth_b[valid_mask]
 
-            masked_img = depth_b * mask_b + (1 - mask_b) * ((depth_b * mask_b - (1 - mask_b) * 100000).max())  # set the value of un-mask to the min-val in mask    # (H, W)
-            norm_masked_depth = masked_img / (np.nanmax(masked_img) - np.nanmin(masked_img))  # norm    # (H, W)
+            if valid_depth.size == 0:
+                norm_masked_depth = np.zeros_like(depth_b, dtype=np.float32)
+            else:
+                valid_min = np.nanmin(valid_depth)
+                valid_max = np.nanmax(valid_depth)
+                depth_range = valid_max - valid_min
+
+                if not np.isfinite(depth_range) or depth_range <= 1e-8:
+                    norm_masked_depth = np.zeros_like(depth_b, dtype=np.float32)
+                else:
+                    norm_masked_depth = (depth_b - valid_min) / depth_range
+                    norm_masked_depth = np.clip(norm_masked_depth, 0.0, 1.0)
 
             cmap = plt.get_cmap('jet')
             depth_rgb = cmap(norm_masked_depth)[..., 0:3]
@@ -694,6 +710,12 @@ class BaseHairTrainer(BaseTrainer):
             'depth',
             'flame_mesh_render',
             'flame_mesh_overlay',
+            'face_cleanup_render',
+            'face_cleanup_before',
+            'face_cleanup_after',
+            'face_cleanup_input',
+            'face_cleanup_base',
+            'face_cleanup_hole_mask',
             'sparse_pixel_map',
             'translator_image_render',
             'injected_orient',
@@ -701,6 +723,7 @@ class BaseHairTrainer(BaseTrainer):
             'injected_mask',
             'injected_inverse_intersection_mask',
             'injected_sparse_pixel_map',
+            'injected_composite',
             'cycle_translator_render',
             'cycle_encoded_orient',
             'cycle_encoded_depth',
@@ -713,7 +736,7 @@ class BaseHairTrainer(BaseTrainer):
         }
         orient_keys = {'strand', 'injected_orient', 'cycle_encoded_orient'}
         depth_keys = set(depth_mask_map.keys())
-        mask_keys = {'injected_mask', 'injected_inverse_intersection_mask'}
+        mask_keys = {'injected_mask', 'injected_inverse_intersection_mask', 'face_cleanup_hole_mask'}
 
         prepared = []
         for key in image_keys:
@@ -807,6 +830,18 @@ class BaseHairTrainer(BaseTrainer):
             visualizations['flame_mesh_overlay'] = (
                 batch['img'].detach().cpu() * 0.65 + outputs['flame_render_image'].detach().cpu() * 0.35
             ).clamp(0.0, 1.0)
+        if 'face_cleanup_render' in outputs:
+            visualizations['face_cleanup_render'] = outputs['face_cleanup_render']
+        if 'face_cleanup_before' in outputs:
+            visualizations['face_cleanup_before'] = outputs['face_cleanup_before']
+        if 'face_cleanup_after' in outputs:
+            visualizations['face_cleanup_after'] = outputs['face_cleanup_after']
+        if 'face_cleanup_input' in outputs:
+            visualizations['face_cleanup_input'] = outputs['face_cleanup_input']
+        if 'face_cleanup_base' in outputs:
+            visualizations['face_cleanup_base'] = outputs['face_cleanup_base']
+        if 'face_cleanup_hole_mask' in outputs:
+            visualizations['face_cleanup_hole_mask'] = outputs['face_cleanup_hole_mask']
 
         if self.config.arch.enable_fuse_generator:
             if 'reconstructed_img' in outputs:
@@ -823,6 +858,8 @@ class BaseHairTrainer(BaseTrainer):
             visualizations['injected_inverse_intersection_mask'] = outputs['hair_render_inverse_intersection_mask']
         if 'hair_render_sparse_color_map' in outputs:
             visualizations['injected_sparse_pixel_map'] = outputs['hair_render_sparse_color_map']
+        if 'injected_composite' in outputs:
+            visualizations['injected_composite'] = outputs['injected_composite']
         if 'hair_cycle_reconstruction' in outputs:
             visualizations['cycle_translator_render'] = outputs['hair_cycle_reconstruction']
         if 'hair_cycle_strand' in outputs:

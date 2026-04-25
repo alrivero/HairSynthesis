@@ -1,9 +1,11 @@
 import logging
 import sys
+from contextlib import nullcontext
 from omegaconf import OmegaConf
 import torch
 from tqdm import tqdm
 from src.hair_synthesis_trainer import HairSynthesisTrainer
+from src.utils.runtime_diagnostics import RuntimeDiagnostics
 import os
 from datetime import datetime
 from collections import defaultdict
@@ -19,6 +21,8 @@ except ImportError:
 def ensure_config_defaults(conf):
     if 'train' in conf and 'run_name_suffix' not in conf.train:
         conf.train.run_name_suffix = ''
+    if 'train' in conf and 'warmup_batches' not in conf.train:
+        conf.train.warmup_batches = 0
 
 
 def format_run_name_suffix(suffix):
@@ -84,6 +88,14 @@ if __name__ == '__main__':
     os.makedirs(loss_plots_save_path, exist_ok=True)    
     OmegaConf.save(config, os.path.join(config.train.log_path, 'config.yaml'))
     start_time = time.perf_counter()
+    diagnostics = RuntimeDiagnostics.from_config(config)
+    diagnostics.record_event(
+        'run_start',
+        run_name=run_name,
+        resume=bool(config.resume),
+        load_encoder=bool(config.load_encoder),
+        load_fuse_generator=bool(config.load_fuse_generator),
+    )
 
     wandb_run = None
     use_wandb = bool(
@@ -115,8 +127,14 @@ if __name__ == '__main__':
 
     train_loader, val_loader = load_dataloaders(config)
     print("train_loader", len(train_loader), "val_loader", len(val_loader))
+    diagnostics.record_event(
+        'dataloaders_ready',
+        train_batches=len(train_loader),
+        val_batches=len(val_loader),
+    )
 
     trainer = HairSynthesisTrainer(config)
+    trainer.runtime_diagnostics = diagnostics
     trainer = trainer.to(config.device)
 
     if config.resume:
@@ -128,79 +146,236 @@ if __name__ == '__main__':
 
     losses_hist = {'train': {}, 'val': {}, 'train_b': {}, 'val_b': {}}
     global_train_step = 0
-    for epoch in range(config.train.resume_epoch, config.train.num_epochs):
-        # Configure epoch-dependent learning rates.
-        trainer.configure_optimizers(len(train_loader), epoch_idx=epoch)
+    train_batches_seen = config.train.resume_epoch * len(train_loader)
+    trainer_created = True
 
-        for phase in ['train', 'val']:
-            loader = train_loader if phase == 'train' else val_loader
-            epoch_loss_sum = defaultdict(float)
+    try:
+        for epoch in range(config.train.resume_epoch, config.train.num_epochs):
+            diagnostics.record_event('epoch_start', epoch_idx=epoch)
 
-            progress = tqdm(
-                enumerate(loader),
-                total=len(loader),
-                desc=f"Epoch {epoch + 1}/{config.train.num_epochs} - {phase}",
-                leave=(phase == 'val'),
-            )
-            for batch_idx, batch in progress:
-                if batch is None:
-                    continue
+            # Configure epoch-dependent learning rates.
+            trainer.configure_optimizers(len(train_loader), epoch_idx=epoch)
 
-                trainer.set_freeze_status(config, batch_idx, epoch)
+            for phase in ['train', 'val']:
+                loader = train_loader if phase == 'train' else val_loader
+                epoch_loss_sum = defaultdict(float)
+                diagnostics.record_event(
+                    'phase_start',
+                    epoch_idx=epoch,
+                    phase=phase,
+                    num_batches=len(loader),
+                )
 
-                for key in batch:
-                    batch[key] = batch[key].to(config.device)
-
-                outputs = trainer.step(batch, batch_idx, phase=phase, epoch_idx=epoch)
-                current_loss = trainer.current_loss
-                for k, v in current_loss.items():
-                    epoch_loss_sum[k] += v
-                    losses_hist[f"{phase}_b"].setdefault(k, []).append(v)
-
-                if wandb_run is not None and phase == 'train':
-                    batch_metrics = {
-                        f'{phase}/batch/{k}': float(v)
-                        for k, v in current_loss.items()
-                    }
-                    batch_metrics['epoch'] = epoch
-                    if hasattr(trainer, 'encoder_optimizer'):
-                        batch_metrics['train/lr_encoder'] = float(trainer.encoder_optimizer.param_groups[0]['lr'])
-                    if getattr(config.arch, 'enable_fuse_generator', False) and hasattr(trainer, 'smirk_generator_optimizer'):
-                        batch_metrics['train/lr_generator'] = float(trainer.smirk_generator_optimizer.param_groups[0]['lr'])
-                    wandb.log(batch_metrics, step=global_train_step)
-                    global_train_step += 1
-
-                if batch_idx % config.train.visualize_every == 0:
-                    if not config.train.visualize_phase.get(phase, False):
+                progress = tqdm(
+                    enumerate(loader),
+                    total=len(loader),
+                    desc=f"Epoch {epoch + 1}/{config.train.num_epochs} - {phase}",
+                    leave=(phase == 'val'),
+                )
+                for batch_idx, batch in progress:
+                    if batch is None:
+                        diagnostics.record_event(
+                            'batch_none',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                        )
                         continue
-                    
-                    with torch.no_grad():
-                        visualizations = trainer.create_visualizations(batch, outputs)
-                        trainer.save_visualizations(visualizations, f"{config.train.log_path}/{phase}_images/{epoch}_{batch_idx}.jpg")
-            
-            epoch_loss_mean = {k: v/len(loader) for k, v in epoch_loss_sum.items()}
 
-            trainer.logging_epoch(epoch, epoch_loss_mean, phase)
-            if wandb_run is not None:
-                epoch_metrics = {
-                    f'{phase}/epoch/{k}': float(v)
-                    for k, v in epoch_loss_mean.items()
-                }
-                epoch_metrics['epoch'] = epoch
-                wandb.log(epoch_metrics, step=global_train_step)
+                    should_visualize = bool(
+                        config.train.visualize_phase.get(phase, False)
+                        and (batch_idx % config.train.visualize_every == 0)
+                    )
+                    log_this_batch = diagnostics.should_log_batch(
+                        batch_idx,
+                        force=should_visualize,
+                    )
 
-            for k, v in epoch_loss_mean.items():
-                losses_hist[phase].setdefault(k, []).append(v)
-            # print("losses_hist", losses_hist)
-        trainer.plot_losses(losses_hist)
+                    diagnostics.set_batch_context(
+                        epoch_idx=epoch,
+                        phase=phase,
+                        batch_idx=batch_idx,
+                        train_batch_step=train_batches_seen,
+                        should_visualize=should_visualize,
+                        stage='batch_start',
+                        status='running',
+                    )
+                    if log_this_batch:
+                        diagnostics.record_event(
+                            'batch_start',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                            train_batch_step=train_batches_seen,
+                            should_visualize=should_visualize,
+                        )
 
-        if epoch % config.train.save_every == 0 or epoch == (config.train.num_epochs-1):
-            trainer.save_model(trainer.state_dict(), os.path.join(config.train.log_path, 'model_{}.pt'.format(epoch)))
+                    trainer.set_train_batch_progress(
+                        train_batch_step=train_batches_seen,
+                        train_batches_per_epoch=len(train_loader),
+                    )
+                    if phase == 'train':
+                        trainer.maybe_reset_after_warmup(
+                            batch_idx=batch_idx,
+                            epoch_idx=epoch,
+                            train_batches_per_epoch=len(train_loader),
+                        )
+                    trainer.set_freeze_status(config, batch_idx, epoch)
 
-    elapsed = time.perf_counter() - start_time
-    trainer.logger.info(f"Elapsed: {int(elapsed // 60)} min {(elapsed % 60):.2f} sec")
-    if wandb_run is not None:
-        wandb.log({'runtime/elapsed_sec': elapsed}, step=global_train_step)
-        wandb.finish()
+                    move_context = (
+                        diagnostics.stage(
+                            'batch.move_to_device',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                        )
+                        if log_this_batch
+                        else nullcontext()
+                    )
+                    with move_context:
+                        for key in batch:
+                            batch[key] = batch[key].to(config.device)
 
-    logging.shutdown()
+                    step_context = (
+                        diagnostics.stage(
+                            'trainer.step',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                            train_batch_step=train_batches_seen,
+                            should_visualize=should_visualize,
+                        )
+                        if log_this_batch
+                        else nullcontext()
+                    )
+                    with step_context:
+                        outputs = trainer.step(batch, batch_idx, phase=phase, epoch_idx=epoch)
+
+                    if phase == 'train':
+                        train_batches_seen += 1
+                    current_loss = trainer.current_loss
+                    for k, v in current_loss.items():
+                        epoch_loss_sum[k] += v
+                        losses_hist[f"{phase}_b"].setdefault(k, []).append(v)
+
+                    if wandb_run is not None and phase == 'train':
+                        batch_metrics = {
+                            f'{phase}/batch/{k}': float(v)
+                            for k, v in current_loss.items()
+                        }
+                        batch_metrics['epoch'] = epoch
+                        if hasattr(trainer, 'encoder_optimizer'):
+                            batch_metrics['train/lr_encoder'] = float(trainer.encoder_optimizer.param_groups[0]['lr'])
+                        if getattr(config.arch, 'enable_fuse_generator', False) and hasattr(trainer, 'smirk_generator_optimizer'):
+                            batch_metrics['train/lr_generator'] = float(trainer.smirk_generator_optimizer.param_groups[0]['lr'])
+                        wandb.log(batch_metrics, step=global_train_step)
+                        global_train_step += 1
+
+                    if should_visualize:
+                        vis_path = f"{config.train.log_path}/{phase}_images/{epoch}_{batch_idx}.jpg"
+                        diagnostics.record_event(
+                            'visualization_requested',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                            save_path=vis_path,
+                        )
+                        with torch.no_grad():
+                            with diagnostics.stage(
+                                'visualization.create',
+                                epoch_idx=epoch,
+                                phase=phase,
+                                batch_idx=batch_idx,
+                                save_path=vis_path,
+                            ):
+                                visualizations = trainer.create_visualizations(batch, outputs)
+                            with diagnostics.stage(
+                                'visualization.save',
+                                epoch_idx=epoch,
+                                phase=phase,
+                                batch_idx=batch_idx,
+                                save_path=vis_path,
+                            ):
+                                trainer.save_visualizations(visualizations, vis_path)
+                        diagnostics.record_event(
+                            'visualization_saved',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                            save_path=vis_path,
+                        )
+                        del visualizations
+
+                    if log_this_batch:
+                        diagnostics.record_event(
+                            'batch_end',
+                            epoch_idx=epoch,
+                            phase=phase,
+                            batch_idx=batch_idx,
+                            train_batch_step=train_batches_seen,
+                            total_loss=current_loss.get('total_loss') if current_loss is not None else None,
+                            loss_first_path=current_loss.get('loss_first_path') if current_loss is not None else None,
+                            loss_second_path=current_loss.get('loss_second_path') if current_loss is not None else None,
+                        )
+                    diagnostics.set_batch_context(stage='batch_complete', status='idle')
+
+                epoch_loss_mean = {k: v/len(loader) for k, v in epoch_loss_sum.items()}
+
+                trainer.logging_epoch(epoch, epoch_loss_mean, phase)
+                diagnostics.record_event(
+                    'phase_end',
+                    epoch_idx=epoch,
+                    phase=phase,
+                    epoch_loss_mean=epoch_loss_mean,
+                )
+                if wandb_run is not None:
+                    epoch_metrics = {
+                        f'{phase}/epoch/{k}': float(v)
+                        for k, v in epoch_loss_mean.items()
+                    }
+                    epoch_metrics['epoch'] = epoch
+                    wandb.log(epoch_metrics, step=global_train_step)
+
+                for k, v in epoch_loss_mean.items():
+                    losses_hist[phase].setdefault(k, []).append(v)
+            trainer.plot_losses(losses_hist)
+
+            if epoch % config.train.save_every == 0 or epoch == (config.train.num_epochs-1):
+                checkpoint_path = os.path.join(config.train.log_path, 'model_{}.pt'.format(epoch))
+                diagnostics.record_event(
+                    'checkpoint_save_start',
+                    epoch_idx=epoch,
+                    save_path=checkpoint_path,
+                )
+                trainer.save_model(trainer.state_dict(), checkpoint_path)
+                diagnostics.record_event(
+                    'checkpoint_save_end',
+                    epoch_idx=epoch,
+                    save_path=checkpoint_path,
+                )
+
+            diagnostics.record_event('epoch_end', epoch_idx=epoch)
+    except Exception as exc:
+        diagnostics.record_event(
+            'run_exception',
+            exception_type=type(exc).__name__,
+            exception_message=str(exc),
+        )
+        diagnostics.dump_cuda_memory(label='run_exception')
+        raise
+    finally:
+        elapsed = time.perf_counter() - start_time
+        if trainer_created and hasattr(trainer, 'logger'):
+            trainer.logger.info(f"Elapsed: {int(elapsed // 60)} min {(elapsed % 60):.2f} sec")
+        diagnostics.record_event('run_end', elapsed_sec=elapsed)
+        if wandb_run is not None:
+            try:
+                wandb.log({'runtime/elapsed_sec': elapsed}, step=global_train_step)
+            except Exception:
+                pass
+            try:
+                wandb.finish()
+            except Exception:
+                pass
+        diagnostics.close()
+        logging.shutdown()

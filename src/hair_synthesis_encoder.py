@@ -1,9 +1,10 @@
 import torch
 from torch import nn
+import numpy as np
 
 from external.HairStep.lib.model.img2hairstep.UNet import Model as StrandModel
 from external.HairStep.lib.model.img2hairstep.hourglass import Model as DepthModel
-from utils.torchutils import torch_nanminmax
+from src.utils.torchutils import torch_nanminmax
 
 
 class HairSynthesisEncoder(nn.Module):
@@ -16,12 +17,41 @@ class HairSynthesisEncoder(nn.Module):
         config=None,
     ) -> None:
         super().__init__()
+        self.config = config
+        self.encoder_mode = getattr(self.config.arch, 'encoder_mode', 'hairstep_maps')
 
         self.strand_encoder = StrandModel()
         if img2strand_ckpt is not None:
             self.strand_encoder.load_state_dict(torch.load(img2strand_ckpt))
 
-        if config.arch.depth_branch:
+        if self.encoder_mode == 'perm_latent':
+            perm_latent_dim = int(getattr(self.config.arch, 'perm_latent_dim', 512))
+            perm_condition_dim = int(getattr(self.config.arch, 'perm_theta_condition_dim', 256))
+            perm_cfg = getattr(self.config, 'perm', None)
+            self.theta_pool = nn.AdaptiveAvgPool2d(1)
+            self.fused_pool = nn.AdaptiveAvgPool2d(1)
+            self.theta_head = nn.Sequential(
+                nn.Linear(256, 256),
+                nn.LeakyReLU(inplace=True),
+                nn.Linear(256, perm_latent_dim),
+            )
+            self.theta_condition = nn.Sequential(
+                nn.Linear(perm_latent_dim, perm_condition_dim),
+                nn.LeakyReLU(inplace=True),
+                nn.Linear(perm_condition_dim, perm_condition_dim),
+            )
+            self.beta_head = nn.Sequential(
+                nn.Linear(256 + 16 + perm_condition_dim, 256),
+                nn.LeakyReLU(inplace=True),
+                nn.Linear(256, perm_latent_dim),
+            )
+            theta_base, beta_base = self._load_perm_init_params(
+                getattr(perm_cfg, 'init_params_path', None),
+            )
+            self.register_buffer('theta_base', theta_base)
+            self.register_buffer('beta_base', beta_base)
+            self._initialize_perm_latent_heads()
+        elif config.arch.depth_branch:
             self.depth_encoder = DepthModel()
             if img2depth_ckpt is not None:
                 depth_state = torch.load(img2depth_ckpt)
@@ -29,8 +59,6 @@ class HairSynthesisEncoder(nn.Module):
                 if "module." in list(depth_state.keys())[0]:
                     depth_state = {k.replace("module.", ""): v for k, v in depth_state.items()}
                 self.depth_encoder.load_state_dict(depth_state)
-
-        self.config = config
 
     def forward(self, img, hair_mask, body_mask):
         """Extract strand features and optional depth.
@@ -46,6 +74,25 @@ class HairSynthesisEncoder(nn.Module):
                 `depth_params`: (B, 1, H, W) when depth_branch is enabled
         """
         img = img * hair_mask
+
+        if self.encoder_mode == 'perm_latent':
+            deep_feat, fused_feat = self._extract_backbone_features(img)
+            deep_pooled = self.theta_pool(deep_feat).flatten(1)
+            fused_pooled = self.fused_pool(fused_feat).flatten(1)
+
+            theta_residual = self.theta_head(deep_pooled)
+            theta = self._compose_perm_latent(theta_residual, self.theta_base)
+            theta_condition_input = theta.mean(dim=1) if theta.ndim == 3 else theta
+            theta_condition = self.theta_condition(theta_condition_input).detach()
+            beta_residual = self.beta_head(torch.cat([deep_pooled, fused_pooled, theta_condition], dim=1))
+            beta = self._compose_perm_latent(beta_residual, self.beta_base)
+
+            return {
+                'theta': theta,
+                'beta': beta,
+                'theta_residual': theta_residual,
+                'beta_residual': beta_residual,
+            }
 
         body = body_mask * (1 - hair_mask)
         strand_pred = self.strand_encoder(img)
@@ -97,3 +144,77 @@ class HairSynthesisEncoder(nn.Module):
         return {
             'strand_params': strand_pred,
         }
+
+    def _extract_backbone_features(self, img):
+        body = self.strand_encoder.body
+        r1 = body.C1(img)
+        r2 = body.C2(body.D1(r1))
+        r3 = body.C3(body.D2(r2))
+        r4 = body.C4(body.D3(r3))
+        deep = body.C5(body.D4(r4))
+
+        o1 = body.C6(body.U1(deep, r4))
+        o2 = body.C7(body.U2(o1, r3))
+        o3 = body.C8(body.U3(o2, r2))
+        fused = body.C9(body.U4(o3, r1))
+        return deep, fused
+
+    def _initialize_perm_latent_heads(self) -> None:
+        # Start new PERM latent regressors at exactly zero while keeping the HairStep backbone warm-started.
+        for head in (self.theta_head, self.theta_condition, self.beta_head):
+            final_linear = head[-1]
+            if not isinstance(final_linear, nn.Linear):
+                raise TypeError("Expected perm latent heads to end with nn.Linear layers.")
+            nn.init.zeros_(final_linear.weight)
+            nn.init.zeros_(final_linear.bias)
+
+    def _load_perm_init_params(self, init_params_path):
+        if not init_params_path:
+            return None, None
+
+        perm_params = np.load(init_params_path)
+        if 'theta' not in perm_params or 'beta' not in perm_params:
+            raise KeyError(
+                f"PERM init params at {init_params_path} must contain 'theta' and 'beta' arrays."
+            )
+
+        theta = self._normalize_perm_base_array(perm_params['theta'], name='theta')
+        beta = self._normalize_perm_base_array(perm_params['beta'], name='beta')
+        return theta, beta
+
+    def _normalize_perm_base_array(self, array, *, name):
+        tensor = torch.as_tensor(array, dtype=torch.float32)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        if tensor.ndim not in {2, 3}:
+            raise ValueError(
+                f"PERM init param '{name}' must be rank 1, 2, or 3; got shape {tuple(tensor.shape)}."
+            )
+        return tensor.contiguous()
+
+    def _compose_perm_latent(self, residual, base):
+        if base is None:
+            return residual
+
+        if base.ndim == residual.ndim:
+            if base.shape[0] == 1 and residual.shape[0] != 1:
+                base = base.expand(residual.shape[0], *base.shape[1:])
+            elif base.shape[0] != residual.shape[0]:
+                raise ValueError(
+                    f"PERM base latent batch {base.shape[0]} does not match residual batch {residual.shape[0]}."
+                )
+            return base.to(device=residual.device, dtype=residual.dtype) + residual
+
+        if base.ndim == 3 and residual.ndim == 2:
+            if base.shape[0] == 1 and residual.shape[0] != 1:
+                base = base.expand(residual.shape[0], -1, -1)
+            elif base.shape[0] != residual.shape[0]:
+                raise ValueError(
+                    f"PERM base latent batch {base.shape[0]} does not match residual batch {residual.shape[0]}."
+                )
+            return base.to(device=residual.device, dtype=residual.dtype) + residual.unsqueeze(1)
+
+        raise ValueError(
+            f"Unsupported PERM latent composition shapes: residual={tuple(residual.shape)}, "
+            f"base={tuple(base.shape)}."
+        )

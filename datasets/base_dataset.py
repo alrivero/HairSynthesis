@@ -56,111 +56,15 @@ def _append_if_enabled(transforms, cfg, default_p, factory):
 
 
 def build_color_augmentation(config):
-    train_cfg = getattr(config, 'train', None)
-    color_cfg = _cfg_get(train_cfg, 'color_augmentation', None)
-
-    # Preserve the previous hard-coded augmentation behavior for configs that
-    # do not declare train.color_augmentation.
-    if color_cfg is None:
-        return [
-            A.RandomBrightnessContrast(p=0.5),
-            A.RandomGamma(p=0.5),
-            A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
-            A.CLAHE(p=0.255),
-            A.RGBShift(p=0.25),
-            A.Blur(p=0.1),
-            A.GaussNoise(p=0.5),
-        ]
-
-    if not _cfg_enabled(color_cfg, True):
-        return []
-
-    transforms = []
-
-    rbc_cfg = _cfg_get(color_cfg, 'random_brightness_contrast', None)
-    _append_if_enabled(
-        transforms,
-        rbc_cfg,
-        0.8,
-        lambda cfg, p: A.RandomBrightnessContrast(
-            brightness_limit=_cfg_get(cfg, 'brightness_limit', 0.2),
-            contrast_limit=_cfg_get(cfg, 'contrast_limit', 0.2),
-            p=p,
-        ),
-    )
-
-    gamma_cfg = _cfg_get(color_cfg, 'gamma', None)
-    _append_if_enabled(
-        transforms,
-        gamma_cfg,
-        0.4,
-        lambda cfg, p: A.RandomGamma(
-            gamma_limit=_as_tuple(_cfg_get(cfg, 'gamma_limit', (80, 120))),
-            p=p,
-        ),
-    )
-
-    jitter_cfg = _cfg_get(color_cfg, 'color_jitter', None)
-    _append_if_enabled(
-        transforms,
-        jitter_cfg,
-        0.8,
-        lambda cfg, p: A.ColorJitter(
-            brightness=_cfg_get(cfg, 'brightness', 0.2),
-            contrast=_cfg_get(cfg, 'contrast', 0.2),
-            saturation=_cfg_get(cfg, 'saturation', 0.2),
-            hue=_cfg_get(cfg, 'hue', 0.05),
-            p=p,
-        ),
-    )
-
-    rgb_shift_cfg = _cfg_get(color_cfg, 'rgb_shift', None)
-    _append_if_enabled(
-        transforms,
-        rgb_shift_cfg,
-        0.5,
-        lambda cfg, p: A.RGBShift(
-            r_shift_limit=_cfg_get(cfg, 'r_shift_limit', 15),
-            g_shift_limit=_cfg_get(cfg, 'g_shift_limit', 15),
-            b_shift_limit=_cfg_get(cfg, 'b_shift_limit', 15),
-            p=p,
-        ),
-    )
-
-    clahe_cfg = _cfg_get(color_cfg, 'clahe', None)
-    _append_if_enabled(
-        transforms,
-        clahe_cfg,
-        0.0,
-        lambda cfg, p: A.CLAHE(
-            clip_limit=_cfg_get(cfg, 'clip_limit', 4.0),
-            p=p,
-        ),
-    )
-
-    blur_cfg = _cfg_get(color_cfg, 'blur', None)
-    _append_if_enabled(
-        transforms,
-        blur_cfg,
-        0.0,
-        lambda cfg, p: A.Blur(
-            blur_limit=_cfg_get(cfg, 'blur_limit', 3),
-            p=p,
-        ),
-    )
-
-    noise_cfg = _cfg_get(color_cfg, 'gauss_noise', None)
-    _append_if_enabled(
-        transforms,
-        noise_cfg,
-        0.0,
-        lambda cfg, p: A.GaussNoise(
-            var_limit=_as_tuple(_cfg_get(cfg, 'var_limit', (10.0, 50.0))),
-            p=p,
-        ),
-    )
-
-    return transforms
+    return [
+        A.RandomBrightnessContrast(p=0.5),
+        A.RandomGamma(p=0.5),
+        A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
+        A.CLAHE(p=0.255),
+        A.RGBShift(p=0.25),
+        A.Blur(p=0.1),
+        A.GaussNoise(p=0.5),
+    ]
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -364,6 +268,8 @@ class BaseHairDataset(BaseDataset):
         self.transform = A.Compose(build_color_augmentation(config), additional_targets={
                 'hairmask': 'mask',
                 'bodymask': 'mask',
+                'face_mask': 'mask',
+                'image_mask': 'mask',
                 'encoder_hairmask': 'mask',
                 'encoder_bodymask': 'mask',
             })
@@ -394,6 +300,7 @@ class BaseHairDataset(BaseDataset):
         landmarks_mediapipe=None,
         image_mask_mode='none',
         image_mask=None,
+        face_mask=None,
         encoder_hairmask=None,
         encoder_bodymask=None,
     ):
@@ -403,6 +310,10 @@ class BaseHairDataset(BaseDataset):
         bodymask = self._resize_soft_mask(bodymask)
         if image_mask is not None:
             image_mask = self._resize_soft_mask(image_mask)
+        if face_mask is None:
+            face_mask = np.zeros_like(hairmask, dtype=np.float32)
+        else:
+            face_mask = self._resize_soft_mask(face_mask)
         if encoder_hairmask is None:
             encoder_hairmask = hairmask
         else:
@@ -415,9 +326,9 @@ class BaseHairDataset(BaseDataset):
         bodymask = bodymask.astype(np.float32)
         if image_mask is not None:
             image_mask = image_mask.astype(np.float32)
+        face_mask = face_mask.astype(np.float32)
         encoder_hairmask = encoder_hairmask.astype(np.float32)
         encoder_bodymask = encoder_bodymask.astype(np.float32)
-        image = self._apply_image_mask(image, hairmask, bodymask, image_mask_mode, image_mask=image_mask)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         target_h, target_w = image.shape[:2]
 
@@ -426,25 +337,46 @@ class BaseHairDataset(BaseDataset):
             resized_landmarks = self._resize_landmarks(landmarks_mediapipe, orig_h, orig_w, target_h, target_w)
         # augment
         if not self.test:
+            transform_inputs = {
+                'image': image,
+                'hairmask': hairmask,
+                'bodymask': bodymask,
+                'face_mask': face_mask,
+                'encoder_hairmask': encoder_hairmask,
+                'encoder_bodymask': encoder_bodymask,
+            }
+            if image_mask is not None:
+                transform_inputs['image_mask'] = image_mask
+
             transformed = self.transform(
-                image=image,
-                hairmask=hairmask,
-                bodymask=bodymask,
-                encoder_hairmask=encoder_hairmask,
-                encoder_bodymask=encoder_bodymask,
+                **transform_inputs,
             )
 
-            image = (transformed['image']/255.0).astype(np.float32)
+            image = transformed['image']
             hairmask = transformed['hairmask'].astype(np.float32)
             bodymask = transformed['bodymask'].astype(np.float32)
+            face_mask = transformed['face_mask'].astype(np.float32)
             encoder_hairmask = transformed['encoder_hairmask'].astype(np.float32)
             encoder_bodymask = transformed['encoder_bodymask'].astype(np.float32)
+            if image_mask is not None:
+                image_mask = transformed['image_mask'].astype(np.float32)
         else: 
-            image = (image/255.0).astype(np.float32)
             hairmask = hairmask.astype(np.float32)
             bodymask = bodymask.astype(np.float32)
+            face_mask = face_mask.astype(np.float32)
             encoder_hairmask = encoder_hairmask.astype(np.float32)
             encoder_bodymask = encoder_bodymask.astype(np.float32)
+            if image_mask is not None:
+                image_mask = image_mask.astype(np.float32)
+
+        image = self._apply_image_mask(
+            image,
+            hairmask,
+            bodymask,
+            image_mask_mode,
+            image_mask=image_mask,
+        )
+        image = (image / 255.0).astype(np.float32)
 
         smirk_data = self._prepare_smirk_data((image * 255.0).astype(np.uint8), resized_landmarks)
 
@@ -454,6 +386,7 @@ class BaseHairDataset(BaseDataset):
         image = image.transpose(2,0,1)
         hairmask = hairmask.transpose(2,0,1)
         bodymask = bodymask.transpose(2,0,1)
+        face_mask = face_mask.transpose(2,0,1)
         encoder_hairmask = encoder_hairmask.transpose(2,0,1)
         encoder_bodymask = encoder_bodymask.transpose(2,0,1)
 
@@ -461,6 +394,7 @@ class BaseHairDataset(BaseDataset):
             'img': image,
             'hairmask': hairmask,
             'bodymask': bodymask,
+            'face_mask': face_mask,
             'encoder_hairmask': encoder_hairmask,
             'encoder_bodymask': encoder_bodymask,
         }
@@ -484,10 +418,15 @@ class BaseHairDataset(BaseDataset):
             'hair': 'hair',
             'hairmask': 'hair',
             'hair_mask': 'hair',
+            'face_hair': 'face_hair',
+            'facehair': 'face_hair',
+            'face-hair': 'face_hair',
+            'face+hair': 'face_hair',
+            'face_and_hair': 'face_hair',
         }
         if normalized not in aliases:
             raise ValueError(
-                f"Unsupported image mask mode '{mask_mode}'. Expected one of: none, body, hair."
+                f"Unsupported image mask mode '{mask_mode}'. Expected one of: none, body, hair, face_hair."
             )
         return aliases[normalized]
 
@@ -496,7 +435,7 @@ class BaseHairDataset(BaseDataset):
         if resolved_mode == 'none':
             return image
 
-        if resolved_mode == 'body' and image_mask is not None:
+        if resolved_mode in {'body', 'face_hair'} and image_mask is not None:
             mask = image_mask
         else:
             mask = bodymask if resolved_mode == 'body' else hairmask

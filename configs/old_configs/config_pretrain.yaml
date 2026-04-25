@@ -21,6 +21,17 @@ train:
   samples_per_epoch: 50000
   use_base_model_for_regularization: False
   resume_epoch: 0
+  warmup_epochs: 0
+  warmup_batches: 0
+  debug:
+    dump_hair: False
+    dump_hit_faces: False
+    save_hair_render: False
+    save_step1_perm_strands_ply: False
+    save_hairstep_maps: False
+    save_inverse_intersection_mask: False
+    render_flame_mesh: False
+    break_step2: False
   train_scale_min: 1.2
   train_scale_max: 1.8
   test_scale: 1.6
@@ -83,5 +94,4 @@ dataset:
   CelebA_percentage: 0.3 #0.2
   MEAD_sides_percentage: 0.1 #0.1
   sample_full_video_for_testing: False
-
 

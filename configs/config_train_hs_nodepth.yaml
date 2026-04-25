@@ -42,30 +42,11 @@ train:
     train: True
     val: True
   visualize_every: 25   # num_batch
-  color_augmentation:
-    enabled: True
-    random_brightness_contrast:
-      p: 0.8
-      brightness_limit: 0.2
-      contrast_limit: 0.2
-    gamma:
-      p: 0.4
-      gamma_limit: [80, 120]
-    color_jitter:
-      p: 0.8
-      brightness: 0.2
-      contrast: 0.2
-      saturation: 0.25
-      hue: 0.05
-    rgb_shift:
-      p: 0.5
-      r_shift_limit: 15
-      g_shift_limit: 15
-      b_shift_limit: 15
   debug:
     dump_hair: False
     dump_hit_faces: False
     save_hair_render: False
+    save_step1_perm_strands_ply: False
     save_hairstep_maps: False
     save_inverse_intersection_mask: False
     render_flame_mesh: False
@@ -79,6 +60,8 @@ train:
     candidate_pool: 8
     use_hair_mask_union: True
     fill_inverse_intersection_samples: True
+  step2_face_cleanup:
+    enabled: True
   save_every: 2 # save model every n epochs
   wandb:
     enabled: True
@@ -90,6 +73,7 @@ train:
   use_base_model_for_regularization: True  # use the base model for regularization - when False the regularization is wrt zero
   resume_epoch: 0
   warmup_epochs: 1  # freeze encoder, train generator only, and skip cycle rendering for first N epochs
+  warmup_batches: 0  # optional override; when > 0, use train batches instead of epochs and reset schedulers when warmup ends
   smirk_crop_scale: 1.6
   force_closed_mouth: True
   zero_flame_expression: True
@@ -100,6 +84,7 @@ train:
     noise_std: 0.05
     value_range: [-200.0, 200.0]
     apply_probability: 0.4
+  cycle_consistency_target: maps  # theta_beta/both currently warn and fall back to maps
 
   loss_weights:
     perceptual_vgg_loss: 5.0  # RECONSTRUCTION - perceptual vgg loss weight
@@ -128,6 +113,7 @@ train:
 
 # architectural details
 arch:
+  encoder_mode: hairstep_maps   # hairstep_maps | perm_latent
   encoder_norm_strand_magnitude: True
   enable_fuse_generator: True
   depth_branch: False     # No depth map
@@ -136,6 +122,11 @@ arch:
   use_eyelids: True
   enable_pre_render_culling: False
   pre_render_head_scale: 0.94
+  rasterizer_strand_culling:
+    enabled: False
+    root_segments: 4
+    min_occluded_pixels: 1
+    min_occluded_fraction: 0.0
   perm_scale: 100.0
   perm_translation: [-1.03059 , -0.630004, 3.36756]
   perm_rotation_euler_deg: [0.0, 0.0, 0.0]
@@ -158,9 +149,11 @@ dataset:
     FFHQ_include_list: /data/add_disk3/arivero/images1024x1024/kept_names_mask_reports.txt
     FFHQ_hairmask: /data/add_disk3/arivero/images1024x1024/masks/hair
     FFHQ_bodymask: /data/add_disk3/arivero/images1024x1024/masks/body
+    FFHQ_facemask: /data/add_disk3/arivero/images1024x1024/masks/face
     FFHQ_apply_person_mask_to_image: True
     FFHQ_apply_body_mask_to_image: False
-    FFHQ_apply_mask_to_image: none  # legacy options: none, body, hair
+    FFHQ_apply_face_hair_mask_to_image: False
+    FFHQ_apply_mask_to_image: none  # legacy options: none, body, hair, face_hair
     FFHQ_encoder_hair_support_threshold: 0.05
     FFHQ_mediapipe_landmarks_path:
 
@@ -174,3 +167,8 @@ dataset:
     blenshape_path: assets/blend-shapes/strands-blend-shapes.npz
     Hair20k_path: /data/add_disk4/alrivero/neural-textures/high-res
     load_roots: True
+    root_cache_enabled: True
+    root_scale: 2.5
+    root_cache_workers: 16
+    root_cache_knn_k: 8
+    root_cache_force_rebuild: False

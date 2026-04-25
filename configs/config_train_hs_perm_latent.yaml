@@ -9,8 +9,8 @@ return_low_freq_hair: True
 
 train:
   lr: 5e-4
-  lr_encoder: 1e-4
-  lr_generator: 1e-4
+  lr_encoder: 1e-5
+  lr_generator: 1e-3
   lr_ramp:
     encoder:
       enabled: False
@@ -27,7 +27,7 @@ train:
       end_factor: 1.0
   encoder_batchnorm_eval: True
   gradient_clipping:
-    enabled: False
+    enabled: True
     encoder_max_norm: 0.1
     generator_max_norm: 1.0
     norm_type: 2.0
@@ -36,12 +36,12 @@ train:
   num_workers: 4
   log_path: /data/add_disk3/arivero/logs
   log_append_timestamp: True
-  run_name_suffix: ""  # CLI example: train.run_name_suffix=depthfrozen -> YYYYMMDD_HHMMSS_depthfrozen
+  run_name_suffix: "perm_latent"
   log_losses_every: 0 # 10    # this is per # batch
   visualize_phase:
     train: True
     val: True
-  visualize_every: 75   # num_batch
+  visualize_every: 2   # num_batch
   debug:
     dump_hair: False
     dump_hit_faces: False
@@ -69,19 +69,12 @@ train:
     entity:
     run_name:
     mode: online
-  diagnostics:
-    enabled: True
-    heartbeat_interval_sec: 10
-    batch_log_every: 25
-    trace_batches_every: 0   # 0 = only trace detailed trainer sub-stages on visualize batches
-    enable_faulthandler: True
   Ke: 1 # number of repeated frames for 2nd cycle path
-  use_base_model_for_regularization: True  # use the base model for regularization - when False the regularization is wrt zero
+  use_base_model_for_regularization: True  # ignored in perm_latent mode
   resume_epoch: 0
   warmup_epochs: 0  # freeze encoder, train generator only, and skip cycle rendering for first N epochs
   warmup_batches: 0  # optional override; when > 0, use train batches instead of epochs and reset schedulers when warmup ends
   smirk_crop_scale: 1.6
-  first_path_full_image_probability: 0.3333333333333333
   force_closed_mouth: True
   zero_flame_expression: True
   hair_template_augmentation:
@@ -98,40 +91,39 @@ train:
     reconstruction_loss: 10.0  # RECONSTRUCTION - l1 loss weight
     strand_regularization: 0.0
     depth_regularization: 0.0
-    cycle_loss: 50.0  # overall step-2 cycle scale
+    cycle_loss: 0.0  # overall step-2 cycle scale
     cycle_orient_loss: 1.0
     cycle_depth_loss: 1.0
-    strand_along_regularization: 0.0  # along-strand sign consistency
-    strand_along_step: 1.5   # sampling offset in pixels along predicted orientation
-    strand_local_regularization: 0.0   # local smooth loss
-    strand_local_kernel: 3   # local smooth loss
-    strand_local_stride: 1   # local smooth loss
-    strand_local_padding: 3   # local smooth loss
-    depth_local_regularization: 0.0     # local smooth loss
+    strand_along_regularization: 0.0
+    strand_along_step: 1.5
+    strand_local_regularization: 0.0
+    strand_local_kernel: 3
+    strand_local_stride: 1
+    strand_local_padding: 3
+    depth_local_regularization: 0.0
     depth_local_kernel: 3
 
   optimize_hairstrand: True
-  optimize_hairdepth: False   # has depth but no graph
+  optimize_hairdepth: False
 
-  # automatically tunable hyperparameters - just declared here
   freeze_encoder_in_second_path: False
   freeze_generator_in_second_path: False
   freeze_smirk_encoder: True
 
 # architectural details
 arch:
-  encoder_mode: hairstep_maps   # hairstep_maps | perm_latent
+  encoder_mode: perm_latent   # hairstep_maps | perm_latent
   encoder_norm_strand_magnitude: True
-  enable_fuse_generator: True 
-  depth_branch: True     # No depth map
+  enable_fuse_generator: True
+  depth_branch: True
   num_expression: 50
   num_shape: 300
   use_eyelids: True
   enable_pre_render_culling: False
-  pre_render_head_scale: 0.975
+  pre_render_head_scale: 0.94
   rasterizer_strand_culling:
-    enabled: True
-    root_segments: 50
+    enabled: False
+    root_segments: 4
     min_occluded_pixels: 1
     min_occluded_fraction: 0.0
   perm_scale: 100.0
@@ -150,14 +142,14 @@ checkpoint_smirk: pretrained_models/SMIRK_em1.pt
 load_generator: False
 
 perm:
-  model_path:
-  init_params_path:
+  model_path: /home/alrivero/HairSynthesis/pretrained_models/perm_v1.0
+  init_params_path: /home/alrivero/perm/src/out_afro/afro_perm_params.npz
   latent_space: broadcast_w
   scalp_bounds: [0.1870, 0.8018, 0.4011, 0.8047]
   scalp_mask_path: assets/FLAME_masks/FLAME_masks.pkl
   scalp_mask_key: scalp
-  root_grid_resolution: 64
-  num_render_strands:
+  root_grid_resolution: 128   # dense canonical UV support before root subsampling
+  num_render_strands: 20000    # raise alongside root_grid_resolution if you want more rendered strands
   guide_mask_threshold: 0.35
   use_guide_mask: True
   ray_chunk_size: 128
@@ -166,26 +158,23 @@ perm:
 dataset:
   resolution: 512
 
-  FFHQ: 
+  FFHQ:
     FFHQ_path: /data/add_disk3/arivero/images1024x1024/images
     FFHQ_meta_path: /data/add_disk3/arivero/ffhq-dataset-v2.json
     FFHQ_include_list: /data/add_disk3/arivero/images1024x1024/kept_names_mask_reports.txt
     FFHQ_hairmask: /data/add_disk3/arivero/images1024x1024/masks/hair
     FFHQ_bodymask: /data/add_disk3/arivero/images1024x1024/masks/body
     FFHQ_facemask: /data/add_disk3/arivero/images1024x1024/masks/face
-    FFHQ_apply_person_mask_to_image: False
+    FFHQ_apply_person_mask_to_image: True
     FFHQ_apply_body_mask_to_image: False
-    FFHQ_apply_face_hair_mask_to_image: True
+    FFHQ_apply_face_hair_mask_to_image: False
     FFHQ_apply_mask_to_image: none  # legacy options: none, body, hair, face_hair
     FFHQ_encoder_hair_support_threshold: 0.05
     FFHQ_mediapipe_landmarks_path:
 
-    # percentage of data to use for each dataset
-    FFHQ_percentage: 1    # sampling weight when training multiple datasets
+    FFHQ_percentage: 1
+    FFHQ_percentage_subset: 1
 
-    # using subset of the dataset only
-    FFHQ_percentage_subset: 1 # include list already selects usable images
-  
   Hair20k:
     blenshape_path: assets/blend-shapes/strands-blend-shapes.npz
     Hair20k_path: /data/add_disk1/alrivero/neural-textures/high-res

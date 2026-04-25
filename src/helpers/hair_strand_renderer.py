@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +21,7 @@ class HairRenderOutput:
     image: torch.Tensor              # (B, 4, H, W) packed [mask, dx, dy, depth_norm]
     visibility_mask: torch.Tensor    # (B, 1, H, W) binary mask of rendered hair
     depth: torch.Tensor              # (B, 1, H, W) raw z-buffer of the visible hair
+    strand_visibility: Optional[torch.Tensor] = None  # (B, N) bool mask of strands kept after rasterizer culling
 
 
 class HairStrandRasterizer:
@@ -36,6 +37,10 @@ class HairStrandRasterizer:
         faces_per_pixel: int = 1,
         stroke_width: float = 0.004,
         occlusion_epsilon: float = 1e-4,
+        enable_strand_culling: bool = False,
+        strand_culling_root_segments: int = 4,
+        strand_culling_min_occluded_pixels: int = 1,
+        strand_culling_min_occluded_fraction: float = 0.0,
         depth_bias: float = 10.0,
         device: Optional[torch.device] = None,
     ) -> None:
@@ -49,10 +54,13 @@ class HairStrandRasterizer:
         self.faces_per_pixel = int(faces_per_pixel)
         self.stroke_width = float(stroke_width)
         self.occlusion_epsilon = float(occlusion_epsilon)
+        self.enable_strand_culling = bool(enable_strand_culling)
+        self.strand_culling_root_segments = max(1, int(strand_culling_root_segments))
+        self.strand_culling_min_occluded_pixels = max(1, int(strand_culling_min_occluded_pixels))
+        self.strand_culling_min_occluded_fraction = max(0.0, float(strand_culling_min_occluded_fraction))
         self.depth_bias = float(depth_bias)
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    @torch.no_grad()
     def forward(
         self,
         *,
@@ -61,6 +69,7 @@ class HairStrandRasterizer:
         strands: torch.Tensor,
         cam_params: torch.Tensor,
         strand_colors: Optional[torch.Tensor] = None,
+        strand_mask: Optional[torch.Tensor] = None,
         stroke_width: Optional[float] = None,
     ) -> HairRenderOutput:
         """Render hair strands into HairSynthesis-style 2D features.
@@ -72,11 +81,14 @@ class HairStrandRasterizer:
             cam_params: (B, 3) orthographic parameters [scale, tx, ty].
             strand_colors: optional (B, N, P, C) per-point direction features;
                 when omitted, image-plane dx/dy are derived from the rendered strands.
+            strand_mask: optional (B, N) mask of active strands to rasterize.
             stroke_width: width of the billboarded strand segments in clip units.
         """
         batch_size = flame_vertices.shape[0]
+        num_strands = strands.shape[1]
         device = flame_vertices.device
         stroke = float(stroke_width) if stroke_width is not None else self.stroke_width
+        base_strand_mask = self._resolve_strand_mask(strands, strand_mask)
 
         faces = self._expand_faces(flame_faces, batch_size, device)
 
@@ -91,30 +103,41 @@ class HairStrandRasterizer:
 
         raster_strands = self._prepare_strands(strands, cam_params)
         strand_feature_map = self._prepare_features(raster_strands, strand_colors)
-        hair_verts_list, hair_faces_list, hair_feature_list = self._build_strand_mesh(
+        head_fragments = self._rasterize(head_meshes, blur=0.0)
+        head_depth, head_mask = self._extract_depth(head_fragments)
+
+        hair_pass = self._rasterize_hair_pass(
             raster_strands,
             strand_feature_map,
             stroke,
+            strand_mask=base_strand_mask,
         )
-        hair_meshes = Meshes(verts=hair_verts_list, faces=hair_faces_list)
-        hair_meshes = self._ensure_triangle_mesh(hair_meshes, label='hair')
+        final_strand_mask = base_strand_mask
+        if self.enable_strand_culling and not bool(hair_pass['empty']) and num_strands > 0:
+            refined_strand_mask = self._cull_strands_with_rasterizer(
+                head_depth=head_depth,
+                head_mask=head_mask,
+                hair_fragments=hair_pass['fragments'],
+                packed_face_strand_ids=hair_pass['packed_face_strand_ids'],
+                packed_face_segment_ids=hair_pass['packed_face_segment_ids'],
+                strand_mask=base_strand_mask,
+                num_strands=num_strands,
+            )
+            if not torch.equal(refined_strand_mask, base_strand_mask):
+                hair_pass = self._rasterize_hair_pass(
+                    raster_strands,
+                    strand_feature_map,
+                    stroke,
+                    strand_mask=refined_strand_mask,
+                )
+            final_strand_mask = refined_strand_mask
 
-        head_fragments = self._rasterize(head_meshes, blur=0.0)
-        hair_fragments = self._rasterize(hair_meshes, blur=self.blur_radius)
+        hair_depth = hair_pass['depth']
+        hair_mask = hair_pass['mask']
+        hair_features = hair_pass['features']
 
-        head_depth, head_mask = self._extract_depth(head_fragments)
-        hair_depth, hair_mask = self._extract_depth(hair_fragments)
+        visible_mask = self._compute_visible_mask(hair_mask, hair_depth, head_mask, head_depth)
 
-        visible_mask = hair_mask & (
-            (~head_mask) | (hair_depth <= (head_depth - self.occlusion_epsilon))
-        )
-
-        hair_features = self._sample_hair_attributes(
-            hair_meshes,
-            hair_fragments,
-            hair_feature_list,
-            feat_dim=2,
-        )
         visible_dxdy = self._apply_visibility_mask(hair_features, visible_mask)
         visible_dxdy = self._rotate_dxdy_to_hairstep(visible_dxdy)
         depth_norm = self._normalize_visible_depth(hair_depth, visible_mask)
@@ -137,6 +160,7 @@ class HairStrandRasterizer:
             image=packed,
             visibility_mask=visible_mask.unsqueeze(1).float(),
             depth=depth_map.unsqueeze(1),
+            strand_visibility=final_strand_mask,
         )
 
     # ------------------------------------------------------------------
@@ -182,6 +206,24 @@ class HairStrandRasterizer:
             faces = faces.reshape(faces.shape[0], -1, 3)
         return faces
 
+    def _resolve_strand_mask(
+        self,
+        strands: torch.Tensor,
+        strand_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        batch, num_strands = strands.shape[:2]
+        if strand_mask is None:
+            return torch.ones((batch, num_strands), device=strands.device, dtype=torch.bool)
+
+        mask = strand_mask.to(device=strands.device)
+        if mask.ndim == 3 and mask.shape[-1] == 1:
+            mask = mask[..., 0]
+        if mask.shape != (batch, num_strands):
+            raise ValueError(
+                f"strand_mask must have shape {(batch, num_strands)}, got {tuple(mask.shape)}"
+            )
+        return mask.bool()
+
     # ------------------------------------------------------------------
     # Strand processing
     # ------------------------------------------------------------------
@@ -206,17 +248,40 @@ class HairStrandRasterizer:
         strands: torch.Tensor,
         features: torch.Tensor,
         stroke_width: float,
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+        strand_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[
+        List[torch.Tensor],
+        List[torch.Tensor],
+        List[torch.Tensor],
+        List[torch.Tensor],
+        List[torch.Tensor],
+    ]:
         verts_list: List[torch.Tensor] = []
         faces_list: List[torch.Tensor] = []
         feature_list: List[torch.Tensor] = []
+        face_strand_ids_list: List[torch.Tensor] = []
+        face_segment_ids_list: List[torch.Tensor] = []
 
         batch, num_strands, num_points, _ = strands.shape
         for b in range(batch):
             start = strands[b, :, :-1, :]
             end = strands[b, :, 1:, :]
             seg_features = features[b, :, :-1, :]
+            active_strand_ids = torch.arange(num_strands, device=strands.device, dtype=torch.long)
 
+            if strand_mask is not None:
+                active = strand_mask[b].bool()
+                active_strand_ids = torch.nonzero(active, as_tuple=False).squeeze(1)
+                start = start[active]
+                end = end[active]
+                seg_features = seg_features[active]
+
+            segment_ids = torch.arange(
+                max(num_points - 1, 0),
+                device=strands.device,
+                dtype=torch.long,
+            ).view(1, -1).expand(start.shape[0], -1)
+            strand_ids = active_strand_ids.view(-1, 1).expand(-1, start.shape[1])
             dir2d = end[..., :2] - start[..., :2]
             seg_len = torch.linalg.norm(dir2d, dim=-1)
             valid = seg_len > 1e-6
@@ -225,12 +290,16 @@ class HairStrandRasterizer:
                 verts_list.append(strands.new_zeros((0, 3)))
                 faces_list.append(torch.zeros((0, 3), dtype=torch.long, device=strands.device))
                 feature_list.append(strands.new_zeros((0, 2)))
+                face_strand_ids_list.append(torch.zeros((0,), dtype=torch.long, device=strands.device))
+                face_segment_ids_list.append(torch.zeros((0,), dtype=torch.long, device=strands.device))
                 continue
 
             start_valid = start[valid]
             end_valid = end[valid]
             seg_features_valid = seg_features[valid]
             dir_valid = dir2d[valid]
+            strand_ids_valid = strand_ids[valid]
+            segment_ids_valid = segment_ids[valid]
 
             perp = torch.stack([-dir_valid[:, 1], dir_valid[:, 0]], dim=-1)
             perp = F.normalize(perp, dim=-1, eps=1e-6) * (stroke_width * 0.5)
@@ -261,16 +330,82 @@ class HairStrandRasterizer:
             )
             faces = tris.view(-1, 3).contiguous().long()
             faces_list.append(faces)
+            face_strand_ids_list.append(strand_ids_valid.repeat_interleave(2).contiguous())
+            face_segment_ids_list.append(segment_ids_valid.repeat_interleave(2).contiguous())
 
         faces_list = [
             (faces if faces.numel() == 0 else faces.reshape(-1, 3).contiguous().long())
             for faces in faces_list
         ]
-        return verts_list, faces_list, feature_list
+        return verts_list, faces_list, feature_list, face_strand_ids_list, face_segment_ids_list
 
     # ------------------------------------------------------------------
     # Rasterization & compositing
     # ------------------------------------------------------------------
+    def _rasterize_hair_pass(
+        self,
+        strands: torch.Tensor,
+        features: torch.Tensor,
+        stroke_width: float,
+        *,
+        strand_mask: torch.Tensor,
+    ) -> Dict[str, object]:
+        batch_size = strands.shape[0]
+        device = strands.device
+        hair_verts_list, hair_faces_list, hair_feature_list, face_strand_ids_list, face_segment_ids_list = self._build_strand_mesh(
+            strands,
+            features,
+            stroke_width,
+            strand_mask=strand_mask,
+        )
+
+        if self._mesh_list_is_empty(hair_verts_list, hair_faces_list):
+            height, width = self.image_size
+            return {
+                'depth': torch.full(
+                    (batch_size, height, width),
+                    float('inf'),
+                    device=device,
+                    dtype=strands.dtype,
+                ),
+                'mask': torch.zeros(
+                    (batch_size, height, width),
+                    device=device,
+                    dtype=torch.bool,
+                ),
+                'features': torch.zeros(
+                    (batch_size, 2, height, width),
+                    device=device,
+                    dtype=strands.dtype,
+                ),
+                'fragments': None,
+                'packed_face_strand_ids': torch.zeros((0,), dtype=torch.long, device=device),
+                'packed_face_segment_ids': torch.zeros((0,), dtype=torch.long, device=device),
+                'empty': True,
+            }
+
+        hair_meshes = Meshes(verts=hair_verts_list, faces=hair_faces_list)
+        hair_meshes = self._ensure_triangle_mesh(hair_meshes, label='hair')
+        packed_face_strand_ids = torch.cat(face_strand_ids_list, dim=0)
+        packed_face_segment_ids = torch.cat(face_segment_ids_list, dim=0)
+        hair_fragments = self._rasterize(hair_meshes, blur=self.blur_radius)
+        hair_depth, hair_mask = self._extract_depth(hair_fragments)
+        hair_features = self._sample_hair_attributes(
+            hair_meshes,
+            hair_fragments,
+            hair_feature_list,
+            feat_dim=2,
+        )
+        return {
+            'depth': hair_depth,
+            'mask': hair_mask,
+            'features': hair_features,
+            'fragments': hair_fragments,
+            'packed_face_strand_ids': packed_face_strand_ids,
+            'packed_face_segment_ids': packed_face_segment_ids,
+            'empty': False,
+        }
+
     def _rasterize(self, meshes: Meshes, blur: float) -> Fragments:
         pix_to_face, zbuf, bary, dists = rasterize_meshes(
             meshes,
@@ -293,6 +428,75 @@ class HairStrandRasterizer:
         mask = fragments.pix_to_face[..., 0] >= 0
         depth = torch.where(mask, zbuf, torch.full_like(zbuf, float('inf')))
         return depth, mask
+
+    def _compute_visible_mask(
+        self,
+        hair_mask: torch.Tensor,
+        hair_depth: torch.Tensor,
+        head_mask: torch.Tensor,
+        head_depth: torch.Tensor,
+    ) -> torch.Tensor:
+        return hair_mask & ((~head_mask) | (hair_depth <= (head_depth - self.occlusion_epsilon)))
+
+    def _cull_strands_with_rasterizer(
+        self,
+        *,
+        head_depth: torch.Tensor,
+        head_mask: torch.Tensor,
+        hair_fragments: Optional[Fragments],
+        packed_face_strand_ids: torch.Tensor,
+        packed_face_segment_ids: torch.Tensor,
+        strand_mask: torch.Tensor,
+        num_strands: int,
+    ) -> torch.Tensor:
+        if hair_fragments is None or packed_face_strand_ids.numel() == 0:
+            return strand_mask
+
+        culled_mask = strand_mask.clone()
+        hair_face = hair_fragments.pix_to_face[..., 0]
+        hair_depth = hair_fragments.zbuf[..., 0]
+
+        for batch_idx in range(hair_face.shape[0]):
+            pixel_face = hair_face[batch_idx]
+            valid_pixel = pixel_face >= 0
+            if not valid_pixel.any():
+                continue
+
+            pixel_face_safe = pixel_face.clone()
+            pixel_face_safe[~valid_pixel] = 0
+            pixel_strand_ids = packed_face_strand_ids[pixel_face_safe]
+            pixel_segment_ids = packed_face_segment_ids[pixel_face_safe]
+
+            root_pixel_mask = valid_pixel & (pixel_segment_ids < self.strand_culling_root_segments)
+            if not root_pixel_mask.any():
+                continue
+
+            occluded_root = root_pixel_mask & head_mask[batch_idx] & (
+                hair_depth[batch_idx] > (head_depth[batch_idx] - self.occlusion_epsilon)
+            )
+            if not occluded_root.any():
+                continue
+
+            occluded_counts = torch.bincount(
+                pixel_strand_ids[occluded_root],
+                minlength=num_strands,
+            )
+            should_cull = occluded_counts >= self.strand_culling_min_occluded_pixels
+
+            if self.strand_culling_min_occluded_fraction > 0.0:
+                root_counts = torch.bincount(
+                    pixel_strand_ids[root_pixel_mask],
+                    minlength=num_strands,
+                ).clamp_min(1)
+                occluded_fraction = occluded_counts.float() / root_counts.float()
+                should_cull = should_cull & (
+                    occluded_fraction >= self.strand_culling_min_occluded_fraction
+                )
+
+            should_cull = should_cull & strand_mask[batch_idx]
+            culled_mask[batch_idx, should_cull] = False
+
+        return culled_mask
 
     def _sample_hair_attributes(
         self,
@@ -376,6 +580,15 @@ class HairStrandRasterizer:
         if fixed:
             meshes = Meshes(verts=verts, faces=new_faces, textures=textures)
         return meshes
+
+    def _mesh_list_is_empty(
+        self,
+        verts_list: List[torch.Tensor],
+        faces_list: List[torch.Tensor],
+    ) -> bool:
+        if len(verts_list) == 0 or len(faces_list) == 0:
+            return True
+        return all(verts.numel() == 0 or faces.numel() == 0 for verts, faces in zip(verts_list, faces_list))
 
     def _interpolate_face_vertex_attributes(
         self,

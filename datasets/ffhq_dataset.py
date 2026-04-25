@@ -15,14 +15,23 @@ class FFHQDataset(BaseHairDataset):
         self.name = 'FFHQ'
         self.dataset_cfg = get_dataset_section(config, 'FFHQ')
         self.mediapipe_dir = getattr(self.dataset_cfg, 'FFHQ_mediapipe_landmarks_path', None)
+        self.face_mask_dir = getattr(
+            self.dataset_cfg,
+            'FFHQ_facemask',
+            getattr(self.dataset_cfg, 'FFHQ_Facemask', None),
+        )
         apply_person_mask = _get_bool(self.dataset_cfg, 'FFHQ_apply_person_mask_to_image', False)
         apply_body_mask = _get_bool(self.dataset_cfg, 'FFHQ_apply_body_mask_to_image', False)
+        apply_face_hair_mask = _get_bool(self.dataset_cfg, 'FFHQ_apply_face_hair_mask_to_image', False)
         image_mask_mode = getattr(self.dataset_cfg, 'FFHQ_apply_mask_to_image', 'none')
         if apply_person_mask or apply_body_mask:
             image_mask_mode = 'body'
+        if apply_face_hair_mask:
+            image_mask_mode = 'face_hair'
         self.image_mask_mode = self._resolve_image_mask_mode(
             image_mask_mode
         )
+
     def __getitem_aux__(self, index):
         img_path = self.data_list[index][0]
         hair_path = self.data_list[index][1]
@@ -47,6 +56,12 @@ class FFHQDataset(BaseHairDataset):
         personmask = soft_personmask
         encoder_hairmask = soft_hairmask
         landmarks_mediapipe = self._load_mediapipe_landmarks(img_path)
+        face_mask = self._load_face_mask(img_path) if self.face_mask_dir else None
+        image_mask = soft_personmask if self.image_mask_mode == 'body' else None
+        if self.image_mask_mode == 'face_hair':
+            if face_mask is None:
+                return None
+            image_mask = np.maximum(face_mask, soft_hairmask)
 
         data_dict = self.prepare_data(
             image=image,
@@ -54,7 +69,8 @@ class FFHQDataset(BaseHairDataset):
             bodymask=personmask,
             landmarks_mediapipe=landmarks_mediapipe,
             image_mask_mode=self.image_mask_mode,
-            image_mask=soft_personmask,
+            image_mask=image_mask,
+            face_mask=face_mask,
             encoder_hairmask=encoder_hairmask,
             encoder_bodymask=soft_personmask,
         )
@@ -71,6 +87,18 @@ class FFHQDataset(BaseHairDataset):
         if not os.path.exists(landmark_path):
             return None
         return np.load(landmark_path, allow_pickle=True).astype(np.float32)
+
+    def _load_face_mask(self, img_path):
+        if not self.face_mask_dir:
+            print('Face mask directory not configured for FFHQ face_hair image masking')
+            return None
+
+        filename = os.path.basename(img_path)
+        face_mask_path = os.path.join(self.face_mask_dir, filename)
+        if not os.path.exists(face_mask_path):
+            print('Face mask not found for %s' % (face_mask_path))
+            return None
+        return self._load_soft_mask(face_mask_path)
 
     @staticmethod
     def _load_soft_mask(mask_path):

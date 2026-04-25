@@ -16,5 +16,15 @@ def _ensure_hairstep_on_path() -> None:
             sys.path.insert(0, hair_step_str)
 
 
-_ensure_hairstep_on_path()
+def _ensure_perm_on_path() -> None:
+    """Adds external/perm/src to sys.path so PERM's top-level imports resolve."""
+    repo_root = Path(__file__).resolve().parent.parent
+    perm_src = repo_root / "external" / "perm" / "src"
+    if perm_src.exists():
+        perm_src_str = str(perm_src)
+        if perm_src_str not in sys.path:
+            sys.path.insert(0, perm_src_str)
 
+
+_ensure_hairstep_on_path()
+_ensure_perm_on_path()
