@@ -41,6 +41,8 @@ class FLAMEHairStrandAttachment(nn.Module):
         mask_threshold: float = 0.5,
         max_mask_samples: Optional[int] = None,
         strand_basis_path: str = "assets/blend-shapes/strands-blend-shapes.npz",
+        coarse_dim: int = 10,
+        fine_detail_cfg: Optional[object] = None,
         ray_chunk_size: int = 128,
         device: Optional[torch.device] = None,
         enable_pre_render_culling: bool = False,
@@ -63,7 +65,6 @@ class FLAMEHairStrandAttachment(nn.Module):
         self.scalp_bounds = scalp_bounds or (0.0, 1.0, 0.0, 1.0)
         self.mask_threshold = float(mask_threshold)
         self.max_mask_samples = max_mask_samples
-        self.low_rank_dim = 10
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.ray_chunk_size = max(1, int(ray_chunk_size))
         self.mesh_separation = 1000.0
@@ -77,9 +78,45 @@ class FLAMEHairStrandAttachment(nn.Module):
         basis = torch.from_numpy(strand_npz['blend_shapes']).float()
         self.num_coeff = basis.shape[0]
         self.num_strand_points = basis.shape[1]
+        max_coarse_dim = min(int(self.num_coeff), 54)
+        self.coarse_dim = int(coarse_dim)
+        if self.coarse_dim < 1 or self.coarse_dim > max_coarse_dim:
+            raise ValueError(
+                f"coarse_dim must be in [1, {max_coarse_dim}] for the current strand basis, got {self.coarse_dim}."
+            )
+        self.fine_detail_enabled = bool(self._cfg_get(fine_detail_cfg, 'enabled', False))
+        self.fine_detail_gain_range = (
+            float(self._cfg_get(fine_detail_cfg, 'gain_min', 1.0)),
+            float(self._cfg_get(fine_detail_cfg, 'gain_max', 1.0)),
+        )
+        if self.fine_detail_gain_range[0] > self.fine_detail_gain_range[1]:
+            raise ValueError(
+                "fine_detail_cfg.gain_min must be <= gain_max, "
+                f"got {self.fine_detail_gain_range}."
+            )
+        self.fine_detail_noise_std = float(self._cfg_get(fine_detail_cfg, 'noise_std', 0.0))
+        self.fine_detail_noise_low_res = max(2, int(self._cfg_get(fine_detail_cfg, 'noise_low_res', 16)))
+        self.fine_detail_noise_mode = str(self._cfg_get(fine_detail_cfg, 'noise_mode', 'both')).strip().lower()
+        if self.fine_detail_noise_mode not in {'positive', 'negative', 'both'}:
+            raise ValueError(
+                "fine_detail_cfg.noise_mode must be one of {'positive', 'negative', 'both'}, "
+                f"got {self.fine_detail_noise_mode!r}."
+            )
+        self.fine_detail_apply_probability = min(
+            max(float(self._cfg_get(fine_detail_cfg, 'apply_probability', 1.0)), 0.0),
+            1.0,
+        )
+        self.fine_detail_gain_mode = str(self._cfg_get(fine_detail_cfg, 'gain_mode', 'all_fine')).strip().lower()
+        if self.fine_detail_gain_mode not in {'all_fine', 'curvy_only'}:
+            raise ValueError(
+                "fine_detail_cfg.gain_mode must be one of {'all_fine', 'curvy_only'}, "
+                f"got {self.fine_detail_gain_mode!r}."
+            )
+        self.fine_detail_curvy_top_k = max(1, int(self._cfg_get(fine_detail_cfg, 'curvy_top_k', 8)))
         self.register_buffer('strand_mean', mean)
         self.register_buffer('strand_basis', basis)
         self.register_buffer('strand_basis_flat', basis.view(self.num_coeff, -1))
+        self.register_buffer('basis_curviness_scores', self._compute_basis_curviness_scores(basis))
 
     @torch.no_grad()
     def forward(
@@ -90,6 +127,10 @@ class FLAMEHairStrandAttachment(nn.Module):
         scalp_masks: Optional[torch.Tensor] = None,
         *,
         return_low_frequency: bool = False,
+        enable_fine_detail_aug: Optional[bool] = None,
+        fine_detail_gain_override: Optional[float] = None,
+        fine_detail_noise_std_override: Optional[float] = None,
+        force_fine_detail_apply: Optional[bool] = None,
         return_flame_mesh: bool = False,
         debug_dump: bool = False,
         debug_dump_hit_faces: bool = False,
@@ -117,7 +158,15 @@ class FLAMEHairStrandAttachment(nn.Module):
         )
 
         # 4) Decode the full-resolution hair strands in PERM space.
-        hair_bundle = self._decode_hair_textures(hair_textures, perm_roots, return_low_frequency)
+        hair_bundle = self._decode_hair_textures(
+            hair_textures,
+            perm_roots,
+            return_low_frequency,
+            enable_fine_detail_aug=enable_fine_detail_aug,
+            fine_detail_gain_override=fine_detail_gain_override,
+            fine_detail_noise_std_override=fine_detail_noise_std_override,
+            force_fine_detail_apply=force_fine_detail_apply,
+        )
 
         # 5) Optionally cull strands directly in canonical PERM space before posing them back.
         if self.enable_pre_render_culling:
@@ -274,6 +323,11 @@ class FLAMEHairStrandAttachment(nn.Module):
         hair_textures: torch.Tensor,
         perm_roots: Dict[str, torch.Tensor],
         return_low_frequency: bool,
+        *,
+        enable_fine_detail_aug: Optional[bool],
+        fine_detail_gain_override: Optional[float],
+        fine_detail_noise_std_override: Optional[float],
+        force_fine_detail_apply: Optional[bool],
     ) -> Dict[str, torch.Tensor]:
         """Decode 64-D textures into strand geometry (full + optional low-rank)."""
         if hair_textures.ndim != 4:
@@ -298,6 +352,15 @@ class FLAMEHairStrandAttachment(nn.Module):
         )
         coeffs = coeffs.squeeze(2).permute(0, 2, 1)  # (B, N, 64)
         coeffs = coeffs * valid_mask.unsqueeze(-1)
+        coeffs = self._apply_fine_detail_augmentation(
+            coeffs,
+            grid=grid,
+            valid_mask=valid_mask,
+            enable_override=enable_fine_detail_aug,
+            gain_override=fine_detail_gain_override,
+            noise_std_override=fine_detail_noise_std_override,
+            force_apply_override=force_fine_detail_apply,
+        )
 
         full_strands = self._decode_coefficients(coeffs, positions)
         mask_expanded = valid_mask.unsqueeze(-1).unsqueeze(-1).to(full_strands.dtype)
@@ -313,12 +376,131 @@ class FLAMEHairStrandAttachment(nn.Module):
 
         if return_low_frequency:
             low_coeffs = coeffs.clone()
-            low_coeffs[..., self.low_rank_dim :] = 0.0
+            low_coeffs[..., self.coarse_dim :] = 0.0
             low_strands = self._decode_coefficients(low_coeffs, positions)
             low_strands = low_strands * mask_expanded
             bundle['low'] = low_strands
 
         return bundle
+
+    def _apply_fine_detail_augmentation(
+        self,
+        coeffs: torch.Tensor,
+        *,
+        grid: torch.Tensor,
+        valid_mask: torch.Tensor,
+        enable_override: Optional[bool],
+        gain_override: Optional[float],
+        noise_std_override: Optional[float],
+        force_apply_override: Optional[bool],
+    ) -> torch.Tensor:
+        enabled = self.fine_detail_enabled if enable_override is None else bool(enable_override)
+        if not enabled:
+            return coeffs
+
+        selected_idx = self._select_fine_detail_indices(coeffs.device)
+        if selected_idx.numel() == 0:
+            return coeffs
+
+        gain_min, gain_max = self.fine_detail_gain_range
+        apply_gain = abs(gain_min - 1.0) > 1e-8 or abs(gain_max - 1.0) > 1e-8
+        noise_std = self.fine_detail_noise_std if noise_std_override is None else float(noise_std_override)
+        apply_noise = noise_std > 0.0
+        if not apply_gain and not apply_noise:
+            return coeffs
+
+        out = coeffs.clone()
+        selected = out.index_select(dim=2, index=selected_idx)
+        batch_size = coeffs.shape[0]
+        valid_mask_f = valid_mask.unsqueeze(-1).to(dtype=coeffs.dtype)
+        force_apply = False if force_apply_override is None else bool(force_apply_override)
+
+        if apply_gain:
+            if gain_override is not None:
+                gains = torch.full(
+                    (batch_size, 1, 1),
+                    float(gain_override),
+                    device=coeffs.device,
+                    dtype=coeffs.dtype,
+                )
+            elif abs(gain_min - gain_max) <= 1e-8:
+                gains = torch.full(
+                    (batch_size, 1, 1),
+                    gain_min,
+                    device=coeffs.device,
+                    dtype=coeffs.dtype,
+                )
+            else:
+                gains = torch.empty(
+                    (batch_size, 1, 1),
+                    device=coeffs.device,
+                    dtype=coeffs.dtype,
+                ).uniform_(gain_min, gain_max)
+            selected = selected * gains
+
+        if apply_noise:
+            noise_grid = torch.randn(
+                batch_size,
+                selected_idx.numel(),
+                self.fine_detail_noise_low_res,
+                self.fine_detail_noise_low_res,
+                device=coeffs.device,
+                dtype=coeffs.dtype,
+            )
+            sampled_noise = F.grid_sample(
+                noise_grid,
+                grid,
+                mode='bilinear',
+                padding_mode='border',
+                align_corners=True,
+            )
+            sampled_noise = sampled_noise.squeeze(2).permute(0, 2, 1)
+            if self.fine_detail_noise_mode == 'positive':
+                sampled_noise = sampled_noise.abs()
+            elif self.fine_detail_noise_mode == 'negative':
+                sampled_noise = -sampled_noise.abs()
+            selected = selected + sampled_noise * (noise_std * valid_mask_f)
+
+        if not force_apply and self.fine_detail_apply_probability < 1.0:
+            batch_mask = (
+                torch.rand(batch_size, 1, 1, device=coeffs.device, dtype=coeffs.dtype)
+                < self.fine_detail_apply_probability
+            ).to(dtype=coeffs.dtype)
+            selected = selected * batch_mask + out.index_select(dim=2, index=selected_idx) * (1.0 - batch_mask)
+
+        out[:, :, selected_idx] = selected
+        return out
+
+    def _select_fine_detail_indices(self, device: torch.device) -> torch.Tensor:
+        if self.coarse_dim >= self.num_coeff:
+            return torch.zeros(0, dtype=torch.long, device=device)
+
+        fine_indices = torch.arange(self.coarse_dim, self.num_coeff, device=device, dtype=torch.long)
+        if self.fine_detail_gain_mode == 'all_fine':
+            return fine_indices
+
+        basis_device = self.basis_curviness_scores.device
+        scores = self.basis_curviness_scores.index_select(0, fine_indices.to(device=basis_device)).to(device=device)
+        top_k = min(self.fine_detail_curvy_top_k, fine_indices.numel())
+        if top_k <= 0:
+            return torch.zeros(0, dtype=torch.long, device=device)
+        topk_idx = torch.topk(scores, k=top_k, dim=0, largest=True, sorted=False).indices
+        return fine_indices.index_select(0, topk_idx)
+
+    @staticmethod
+    def _compute_basis_curviness_scores(basis: torch.Tensor) -> torch.Tensor:
+        if basis.shape[1] < 3:
+            return torch.zeros(basis.shape[0], dtype=basis.dtype)
+        second_diff = basis[:, 2:, :] - 2.0 * basis[:, 1:-1, :] + basis[:, :-2, :]
+        return second_diff.norm(dim=-1).mean(dim=-1)
+
+    @staticmethod
+    def _cfg_get(cfg: Optional[object], key: str, default):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
 
     def _project_to_flame_space(
         self,

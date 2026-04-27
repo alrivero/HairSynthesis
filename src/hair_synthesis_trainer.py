@@ -137,12 +137,14 @@ class HairSynthesisTrainer(BaseHairTrainer):
         hair20k_cfg = getattr(self.config.dataset, 'Hair20k', None)
         template_dir_override = None
         blendshape_override = None
+        coarse_dim = 10
         aug_override = None
         load_roots_override = True
         root_cache_cfg = None
         if hair20k_cfg is not None:
             template_dir_override = getattr(hair20k_cfg, 'Hair20k_path', None)
             blendshape_override = getattr(hair20k_cfg, 'blenshape_path', None) or getattr(hair20k_cfg, 'blendshape_path', None)
+            coarse_dim = int(getattr(hair20k_cfg, 'coarse_dim', coarse_dim))
             aug_override = getattr(hair20k_cfg, 'use_augmentation', None)
             load_roots_override = getattr(hair20k_cfg, 'load_roots', True)
             root_cache_cfg = {
@@ -158,6 +160,8 @@ class HairSynthesisTrainer(BaseHairTrainer):
             }
 
         strand_basis_path = blendshape_override or getattr(self.config.arch, 'strand_basis_path', 'assets/blend-shapes/strands-blend-shapes.npz')
+        hair_template_aug_cfg = getattr(self.config.train, 'hair_template_augmentation', None)
+        fine_detail_cfg = self._extract_nested_cfg(hair_template_aug_cfg, 'fine_detail')
         self.load_template_roots = bool(load_roots_override)
 
         self.hair_attachment = FLAMEHairStrandAttachment(
@@ -170,6 +174,8 @@ class HairSynthesisTrainer(BaseHairTrainer):
             mask_threshold=getattr(self.config.arch, 'mask_threshold', 0.5),
             max_mask_samples=getattr(self.config.arch, 'max_mask_samples', None),
             strand_basis_path=strand_basis_path,
+            coarse_dim=coarse_dim,
+            fine_detail_cfg=fine_detail_cfg,
             enable_pre_render_culling=getattr(self.config.arch, 'enable_pre_render_culling', False),
         )
         self.hair_rasterizer = HairStrandRasterizer(
@@ -200,7 +206,7 @@ class HairSynthesisTrainer(BaseHairTrainer):
             ),
         )
         template_dir = template_dir_override or getattr(self.config.dataset, 'hair_template_dir', None)
-        aug_cfg = self._make_aug_cfg(getattr(self.config.train, 'hair_template_augmentation', None), aug_override)
+        aug_cfg = self._make_aug_cfg(hair_template_aug_cfg, aug_override)
 
         self.hair_template_manager = HairTemplateManager(
             template_dir=template_dir,
@@ -1938,6 +1944,13 @@ class HairSynthesisTrainer(BaseHairTrainer):
         if use_aug_override is not None:
             cfg['enabled'] = bool(use_aug_override)
         return cfg if cfg else None
+
+    def _extract_nested_cfg(self, base_cfg, key):
+        if base_cfg is None:
+            return None
+        if isinstance(base_cfg, dict):
+            return base_cfg.get(key)
+        return getattr(base_cfg, key, None)
 
     def step2_old(self, encoder_output, batch, batch_idx, phase='train'):
         if not self.config.arch.enable_fuse_generator:

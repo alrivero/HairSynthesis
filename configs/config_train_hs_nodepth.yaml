@@ -85,6 +85,16 @@ train:
     noise_std: 0.05
     value_range: [-200.0, 200.0]
     apply_probability: 0.4
+    fine_detail:
+      enabled: False
+      gain_min: 1.0
+      gain_max: 1.0
+      noise_std: 0.0
+      noise_low_res: 16
+      noise_mode: both
+      apply_probability: 1.0
+      gain_mode: all_fine
+      curvy_top_k: 8
   cycle_consistency_target: maps  # theta_beta/both currently warn and fall back to maps
 
   loss_weights:
@@ -167,6 +177,9 @@ dataset:
   Hair20k:
     blenshape_path: assets/blend-shapes/strands-blend-shapes.npz
     Hair20k_path: /data/add_disk4/alrivero/neural-textures/high-res
+    # Number of leading Hair20k/PERM coefficients treated as the coarse decode.
+    # The strand basis currently supports coarse_dim in [1, 54].
+    coarse_dim: 10
     load_roots: True
     root_cache_enabled: True
     root_scale: 2.5

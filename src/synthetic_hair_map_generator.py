@@ -25,6 +25,9 @@ class SyntheticHairMapBatch:
     flame_faces: torch.Tensor
     cam_params: torch.Tensor
     template_paths: list[str]
+    coarse_map: Optional[torch.Tensor] = None
+    coarse_visibility_mask: Optional[torch.Tensor] = None
+    coarse_depth_map: Optional[torch.Tensor] = None
 
 
 class SyntheticHairMapGenerator(nn.Module):
@@ -54,12 +57,14 @@ class SyntheticHairMapGenerator(nn.Module):
 
         hair20k_cfg = getattr(self.config.dataset, 'Hair20k', None)
         blendshape_override = None
+        coarse_dim = 10
         template_dir_override = None
         load_roots_override = True
         aug_override = None
         root_cache_cfg = None
         if hair20k_cfg is not None:
             blendshape_override = getattr(hair20k_cfg, 'blenshape_path', None) or getattr(hair20k_cfg, 'blendshape_path', None)
+            coarse_dim = int(getattr(hair20k_cfg, 'coarse_dim', coarse_dim))
             template_dir_override = getattr(hair20k_cfg, 'Hair20k_path', None)
             load_roots_override = getattr(hair20k_cfg, 'load_roots', True)
             aug_override = getattr(hair20k_cfg, 'use_augmentation', None)
@@ -82,6 +87,8 @@ class SyntheticHairMapGenerator(nn.Module):
             'strand_basis_path',
             'assets/blend-shapes/strands-blend-shapes.npz',
         )
+        hair_template_aug_cfg = getattr(self.config.train, 'hair_template_augmentation', None)
+        fine_detail_cfg = self._extract_nested_cfg(hair_template_aug_cfg, 'fine_detail')
         self.load_template_roots = bool(load_roots_override)
         self.hair_attachment = FLAMEHairStrandAttachment(
             flame_model=self.flame,
@@ -93,6 +100,8 @@ class SyntheticHairMapGenerator(nn.Module):
             mask_threshold=getattr(self.config.arch, 'mask_threshold', 0.5),
             max_mask_samples=getattr(self.config.arch, 'max_mask_samples', None),
             strand_basis_path=strand_basis_path,
+            coarse_dim=coarse_dim,
+            fine_detail_cfg=fine_detail_cfg,
             enable_pre_render_culling=getattr(self.config.arch, 'enable_pre_render_culling', False),
         )
         for param in self.hair_attachment.parameters():
@@ -128,7 +137,7 @@ class SyntheticHairMapGenerator(nn.Module):
             ),
         )
 
-        aug_cfg = self._make_aug_cfg(getattr(self.config.train, 'hair_template_augmentation', None), aug_override)
+        aug_cfg = self._make_aug_cfg(hair_template_aug_cfg, aug_override)
         template_dir = template_dir_override or getattr(self.config.dataset, 'hair_template_dir', None)
         self.hair_template_manager = HairTemplateManager(
             template_dir=template_dir,
@@ -138,10 +147,21 @@ class SyntheticHairMapGenerator(nn.Module):
             scalp_bounds=scalp_bounds,
         )
 
-    def forward(self, batch: Dict[str, torch.Tensor]) -> Optional[SyntheticHairMapBatch]:
+    def forward(
+        self,
+        batch: Dict[str, torch.Tensor],
+        *,
+        include_coarse_map: bool = False,
+        hair_templates: Optional[Dict[str, object]] = None,
+        enable_fine_detail_aug: Optional[bool] = None,
+        fine_detail_gain_override: Optional[float] = None,
+        fine_detail_noise_std_override: Optional[float] = None,
+        force_fine_detail_apply: Optional[bool] = None,
+    ) -> Optional[SyntheticHairMapBatch]:
         with torch.no_grad():
             _, flame_params, _, cam_params = self._predict_flame_params(batch)
-            hair_templates = self.hair_template_manager.sample(batch['img'].shape[0], batch['img'].device)
+            if hair_templates is None:
+                hair_templates = self.hair_template_manager.sample(batch['img'].shape[0], batch['img'].device)
             if hair_templates is None:
                 return None
 
@@ -150,28 +170,47 @@ class SyntheticHairMapGenerator(nn.Module):
                 hair_textures=hair_templates['texture'],
                 roots=hair_templates.get('roots') if self.load_template_roots else None,
                 scalp_masks=hair_templates['mask'],
-                return_low_frequency=False,
+                return_low_frequency=include_coarse_map,
+                enable_fine_detail_aug=enable_fine_detail_aug,
+                fine_detail_gain_override=fine_detail_gain_override,
+                fine_detail_noise_std_override=fine_detail_noise_std_override,
+                force_fine_detail_apply=force_fine_detail_apply,
                 return_flame_mesh=False,
                 debug_dump=False,
                 debug_dump_hit_faces=False,
             )
-            raster_out = self.hair_rasterizer.forward(
+            strand_mask = attachment_out.metadata.get('strand_visibility')
+            raster_out = self._rasterize_strands(
                 flame_vertices=attachment_out.metadata['flame_vertices'],
                 flame_faces=attachment_out.metadata['flame_faces'],
                 strands=attachment_out.full_resolution,
                 cam_params=cam_params,
-                strand_mask=attachment_out.metadata.get('strand_visibility'),
+                strand_mask=strand_mask,
             )
+            coarse_raster_out = None
+            if include_coarse_map:
+                if attachment_out.low_frequency is None:
+                    raise RuntimeError("Coarse Hair20k render requested but no low-frequency strands were returned.")
+                coarse_raster_out = self._rasterize_strands(
+                    flame_vertices=attachment_out.metadata['flame_vertices'],
+                    flame_faces=attachment_out.metadata['flame_faces'],
+                    strands=attachment_out.low_frequency,
+                    cam_params=cam_params,
+                    strand_mask=strand_mask,
+                )
             return SyntheticHairMapBatch(
                 clean_map=raster_out.image,
                 visibility_mask=raster_out.visibility_mask,
                 depth_map=raster_out.depth,
                 strands=attachment_out.full_resolution,
-                strand_mask=attachment_out.metadata.get('strand_visibility'),
+                strand_mask=strand_mask,
                 flame_vertices=attachment_out.metadata['flame_vertices'],
                 flame_faces=attachment_out.metadata['flame_faces'],
                 cam_params=cam_params,
                 template_paths=list(hair_templates['paths']),
+                coarse_map=None if coarse_raster_out is None else coarse_raster_out.image,
+                coarse_visibility_mask=None if coarse_raster_out is None else coarse_raster_out.visibility_mask,
+                coarse_depth_map=None if coarse_raster_out is None else coarse_raster_out.depth,
             )
 
     def rerender_with_strand_mask(
@@ -180,7 +219,7 @@ class SyntheticHairMapGenerator(nn.Module):
         strand_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         with torch.no_grad():
-            rerender = self.hair_rasterizer.forward(
+            rerender = self._rasterize_strands(
                 flame_vertices=bundle.flame_vertices,
                 flame_faces=bundle.flame_faces,
                 strands=bundle.strands,
@@ -188,6 +227,23 @@ class SyntheticHairMapGenerator(nn.Module):
                 strand_mask=strand_mask,
             )
             return rerender.image
+
+    def _rasterize_strands(
+        self,
+        *,
+        flame_vertices: torch.Tensor,
+        flame_faces: torch.Tensor,
+        strands: torch.Tensor,
+        cam_params: torch.Tensor,
+        strand_mask: Optional[torch.Tensor],
+    ):
+        return self.hair_rasterizer.forward(
+            flame_vertices=flame_vertices,
+            flame_faces=flame_faces,
+            strands=strands,
+            cam_params=cam_params,
+            strand_mask=strand_mask,
+        )
 
     def _load_smirk_encoder_weights(self, checkpoint_path: Optional[str]) -> None:
         if not checkpoint_path:
@@ -301,3 +357,10 @@ class SyntheticHairMapGenerator(nn.Module):
         if use_aug_override is not None:
             cfg['enabled'] = bool(use_aug_override)
         return cfg if cfg else None
+
+    def _extract_nested_cfg(self, base_cfg, key):
+        if base_cfg is None:
+            return None
+        if isinstance(base_cfg, dict):
+            return base_cfg.get(key)
+        return getattr(base_cfg, key, None)

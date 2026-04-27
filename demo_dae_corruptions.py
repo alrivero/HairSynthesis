@@ -163,6 +163,18 @@ def build_output_dir(config) -> str:
     return output_dir
 
 
+def fine_detail_gain_sweep_levels(config):
+    hair_aug_cfg = getattr(getattr(config, 'train', None), 'hair_template_augmentation', None)
+    fine_detail_cfg = getattr(hair_aug_cfg, 'fine_detail', None) if hair_aug_cfg is not None else None
+    gain_min = float(getattr(fine_detail_cfg, 'gain_min', 1.0)) if fine_detail_cfg is not None else 1.0
+    gain_max = float(getattr(fine_detail_cfg, 'gain_max', 1.0)) if fine_detail_cfg is not None else 1.0
+    sweep_points = (0.25, 0.50, 0.75, 1.00)
+    return [
+        (int(point * 100), gain_min + (gain_max - gain_min) * point)
+        for point in sweep_points
+    ]
+
+
 def trim_batch(batch, max_samples: int):
     if max_samples <= 0:
         return batch
@@ -212,6 +224,14 @@ def first_valid_batch(loader, device: str, max_samples: int):
 def write_summary(config, config_path: str, output_dir: str, families: list[str], weighted_families) -> None:
     demo_cfg = config.dae.demo
     corruption_cfg = config.dae.corruption
+    hair20k_cfg = getattr(getattr(config, 'dataset', None), 'Hair20k', None)
+    coarse_dim = int(getattr(hair20k_cfg, 'coarse_dim', 10))
+    hair_aug_cfg = getattr(getattr(config, 'train', None), 'hair_template_augmentation', None)
+    fine_detail_cfg = getattr(hair_aug_cfg, 'fine_detail', None) if hair_aug_cfg is not None else None
+    gain_min = float(getattr(fine_detail_cfg, 'gain_min', 1.0)) if fine_detail_cfg is not None else 1.0
+    gain_max = float(getattr(fine_detail_cfg, 'gain_max', 1.0)) if fine_detail_cfg is not None else 1.0
+    noise_std = float(getattr(fine_detail_cfg, 'noise_std', 0.0)) if fine_detail_cfg is not None else 0.0
+    noise_mode = str(getattr(fine_detail_cfg, 'noise_mode', 'both')) if fine_detail_cfg is not None else 'both'
     lines = [
         "# DAE Corruption Demo",
         "",
@@ -226,6 +246,24 @@ def write_summary(config, config_path: str, output_dir: str, families: list[str]
         "- `clean`: pristine synthetic render from the current FLAME + Hair20k synthesis path.",
         "- `pre_render`: result after pre-render corruption only, currently the geometry-aware rerender step such as `strand_dropout`.",
         "- `corrupted`: final DAE input after all selected corruptions have been applied.",
+        "",
+        "## Decoded Template Renders",
+        "",
+        "- `00_decoded_maps.jpg` compares the two Hair20k decode paths for the same sampled templates and FLAME poses.",
+        f"- `coarse`: render produced from the first {coarse_dim} Hair20k coefficients only.",
+        "- `coarse_plus_fine`: render produced from all 64 Hair20k coefficients.",
+        "- `00_fine_detail_aug_toggle.jpg` compares the same coarse and coarse-plus-fine renders with fine-detail augmentation forced off and on.",
+        "- `*_off`: fine-detail coefficient augmentation disabled during decode.",
+        "- `*_on`: fine-detail coefficient augmentation enabled during decode using `train.hair_template_augmentation.fine_detail`.",
+        (
+            f"- `00_fine_detail_gain_sweep.jpg` sweeps deterministic fine-detail gain values at 25%, 50%, 75%, "
+            f"and 100% of the configured gain range `[a, b] = [{gain_min}, {gain_max}]`, ordered left-to-right."
+        ),
+        "- Sweep order: `coarse_25`, `coarse_plus_fine_25`, `coarse_50`, `coarse_plus_fine_50`, `coarse_75`, `coarse_plus_fine_75`, `coarse_100`, `coarse_plus_fine_100`.",
+        (
+            f"- `00_fine_detail_noise_toggle.jpg` isolates fine-detail noise with gain forced to `1.0`; "
+            f"it compares noise off vs on using `noise_std={noise_std}` and `noise_mode={noise_mode}`."
+        ),
         "",
     ]
 
@@ -281,10 +319,103 @@ def main():
 
     batch = first_valid_batch(loader, config.device, int(demo_cfg.max_samples))
     with torch.no_grad():
-        bundle = generator(batch)
+        hair_templates = generator.hair_template_manager.sample(batch['img'].shape[0], batch['img'].device)
+        if hair_templates is None:
+            raise RuntimeError("HairTemplateManager returned None for the selected batch.")
+        bundle = generator(batch, include_coarse_map=True, hair_templates=hair_templates)
+        bundle_aug_off = generator(
+            batch,
+            include_coarse_map=True,
+            hair_templates=hair_templates,
+            enable_fine_detail_aug=False,
+        )
+        bundle_aug_on = generator(
+            batch,
+            include_coarse_map=True,
+            hair_templates=hair_templates,
+            enable_fine_detail_aug=True,
+        )
+        bundle_noise_on = generator(
+            batch,
+            include_coarse_map=True,
+            hair_templates=hair_templates,
+            enable_fine_detail_aug=True,
+            fine_detail_gain_override=1.0,
+            force_fine_detail_apply=True,
+        )
+        gain_sweep_bundles = []
+        for percent, gain_value in fine_detail_gain_sweep_levels(config):
+            sweep_bundle = generator(
+                batch,
+                include_coarse_map=True,
+                hair_templates=hair_templates,
+                enable_fine_detail_aug=True,
+                fine_detail_gain_override=gain_value,
+                fine_detail_noise_std_override=0.0,
+                force_fine_detail_apply=True,
+            )
+            gain_sweep_bundles.append((percent, gain_value, sweep_bundle))
     if bundle is None:
         raise RuntimeError("SyntheticHairMapGenerator returned None for the selected batch.")
+    if bundle_aug_off is None or bundle_aug_on is None or bundle_noise_on is None:
+        raise RuntimeError("SyntheticHairMapGenerator failed while preparing fine-detail augmentation toggles.")
+    if any(sweep_bundle is None for _percent, _gain_value, sweep_bundle in gain_sweep_bundles):
+        raise RuntimeError("SyntheticHairMapGenerator failed while preparing fine-detail gain sweep renders.")
     bundle = trim_bundle(bundle, int(demo_cfg.max_samples))
+    bundle_aug_off = trim_bundle(bundle_aug_off, int(demo_cfg.max_samples))
+    bundle_aug_on = trim_bundle(bundle_aug_on, int(demo_cfg.max_samples))
+    bundle_noise_on = trim_bundle(bundle_noise_on, int(demo_cfg.max_samples))
+    gain_sweep_bundles = [
+        (percent, gain_value, trim_bundle(sweep_bundle, int(demo_cfg.max_samples)))
+        for percent, gain_value, sweep_bundle in gain_sweep_bundles
+    ]
+    if bundle.coarse_map is None:
+        raise RuntimeError("SyntheticHairMapGenerator did not return the coarse-only Hair20k render.")
+    if bundle_aug_off.coarse_map is None or bundle_aug_on.coarse_map is None:
+        raise RuntimeError("SyntheticHairMapGenerator did not return coarse-only maps for fine-detail augmentation toggles.")
+    if bundle_noise_on.coarse_map is None:
+        raise RuntimeError("SyntheticHairMapGenerator did not return coarse-only maps for fine-detail noise visualization.")
+    if any(
+        sweep_bundle.coarse_map is None
+        for _percent, _gain_value, sweep_bundle in gain_sweep_bundles
+    ):
+        raise RuntimeError("SyntheticHairMapGenerator did not return coarse-only maps for fine-detail gain sweep renders.")
+
+    save_packed_map_comparison(
+        (
+            ('coarse', bundle.coarse_map.detach().cpu()),
+            ('coarse_plus_fine', bundle.clean_map.detach().cpu()),
+        ),
+        os.path.join(output_dir, '00_decoded_maps.jpg'),
+    )
+    save_packed_map_comparison(
+        (
+            ('coarse_off', bundle_aug_off.coarse_map.detach().cpu()),
+            ('coarse_plus_fine_off', bundle_aug_off.clean_map.detach().cpu()),
+            ('coarse_on', bundle_aug_on.coarse_map.detach().cpu()),
+            ('coarse_plus_fine_on', bundle_aug_on.clean_map.detach().cpu()),
+        ),
+        os.path.join(output_dir, '00_fine_detail_aug_toggle.jpg'),
+    )
+    save_packed_map_comparison(
+        (
+            ('coarse_noise_off', bundle_aug_off.coarse_map.detach().cpu()),
+            ('coarse_plus_fine_noise_off', bundle_aug_off.clean_map.detach().cpu()),
+            ('coarse_noise_on', bundle_noise_on.coarse_map.detach().cpu()),
+            ('coarse_plus_fine_noise_on', bundle_noise_on.clean_map.detach().cpu()),
+        ),
+        os.path.join(output_dir, '00_fine_detail_noise_toggle.jpg'),
+    )
+    gain_sweep_stage_maps = []
+    for percent, _gain_value, sweep_bundle in gain_sweep_bundles:
+        gain_sweep_stage_maps.extend([
+            (f'coarse_{percent}', sweep_bundle.coarse_map.detach().cpu()),
+            (f'coarse_plus_fine_{percent}', sweep_bundle.clean_map.detach().cpu()),
+        ])
+    save_packed_map_comparison(
+        tuple(gain_sweep_stage_maps),
+        os.path.join(output_dir, '00_fine_detail_gain_sweep.jpg'),
+    )
 
     weighted_families = None
     if bool(getattr(demo_cfg, 'include_weighted_mix', True)):

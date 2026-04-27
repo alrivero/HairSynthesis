@@ -35,12 +35,26 @@ train:
     orientation_loss: 2.0
     depth_loss: 1.0
   hair_template_augmentation:
+    # Texture-space Hair20k augmentation applied when templates are sampled.
+    # This happens before strand decode and rasterization, so it changes the clean rendered target itself.
     enabled: False
     scale_min: 0.8
     scale_max: 1.2
     noise_std: 0.05
     value_range: [-200.0, 200.0]
     apply_probability: 0.4
+    fine_detail:
+      # Fine-detail coefficient augmentation applied in the render path after template load,
+      # before strand decode. This is active in DAE training through SyntheticHairMapGenerator.
+      enabled: True
+      gain_min: 1.0
+      gain_max: 3.5
+      noise_std: 0.0
+      noise_low_res: 16
+      noise_mode: positive
+      apply_probability: 1.0
+      gain_mode: all_fine
+      curvy_top_k: 8
   wandb:
     enabled: True
     project: hair-map-dae
@@ -211,6 +225,9 @@ dataset:
   Hair20k:
     blenshape_path: assets/blend-shapes/strands-blend-shapes.npz
     Hair20k_path: /data/add_disk1/alrivero/neural-textures/high-res
+    # Number of leading Hair20k/PERM coefficients treated as the coarse decode.
+    # The strand basis currently supports coarse_dim in [1, 54].
+    coarse_dim: 10
     load_roots: True
     root_cache_enabled: True
     root_scale: 2.5

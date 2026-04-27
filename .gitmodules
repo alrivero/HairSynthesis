@@ -4,3 +4,9 @@
 [submodule "external/perm"]
 	path = external/perm
 	url = https://github.com/c-he/perm.git
+[submodule "external/Restormer"]
+	path = external/Restormer
+	url = https://github.com/swz30/Restormer.git
+[submodule "external/EWT-PyTorch"]
+	path = external/EWT-PyTorch
+	url = https://github.com/MIVRC/EWT-PyTorch.git
