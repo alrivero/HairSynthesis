@@ -51,7 +51,8 @@ train:
     save_inverse_intersection_mask: False
     render_flame_mesh: False
     break_step2: False
-  mask_ratio: 0.01  # pixel to be retained inside the hair mask, ratio is over the whole image
+  smirk_generator_mask_ratio: 0.01  # sparse pixels kept for SMIRK generator inputs, ratio is over the whole image
+  hair_generator_mask_ratio: 0.01  # sparse GT-hair colors injected into the synthetic hair mask, ratio is over the whole image
   mask_dilation_radius: 10 # dilation of the initial hair mask
   step2_sparse_color:
     tangent_radius: 18
@@ -106,8 +107,9 @@ train:
   optimize_hairstrand: True
   optimize_hairdepth: False
 
-  freeze_encoder_in_second_path: False
-  freeze_generator_in_second_path: False
+  second_path_freeze_policy: alternate  # alternate | manual
+  freeze_encoder_in_second_path: False  # used when second_path_freeze_policy=manual
+  freeze_generator_in_second_path: False  # used when second_path_freeze_policy=manual
   freeze_smirk_encoder: True
 
 # architectural details

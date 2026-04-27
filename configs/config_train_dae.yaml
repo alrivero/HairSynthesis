@@ -1,0 +1,219 @@
+resume: False
+device: cuda:0
+image_size: 224
+deterministic: False
+
+train:
+  # Base optimizer LR for DAE training. `lr_encoder` currently drives the DAE model itself.
+  lr: 1e-4
+  lr_encoder: 1e-4
+  resume_epoch: 0
+  num_epochs: 40
+  batch_size: 6
+  num_workers: 4
+  log_path: /data/add_disk3/arivero/logs_dae
+  log_append_timestamp: True
+  run_name_suffix: "dae"
+  log_losses_every: 10
+  save_every: 1
+  visualize_phase:
+    train: True
+    val: True
+  visualize_every: 100
+  smirk_crop_scale: 1.6
+  force_closed_mouth: True
+  zero_flame_expression: True
+  optimizer:
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+  gradient_clipping:
+    enabled: True
+    encoder_max_norm: 1.0
+    norm_type: 2.0
+  loss_weights:
+    mask_loss: 1.0
+    orientation_loss: 2.0
+    depth_loss: 1.0
+  hair_template_augmentation:
+    enabled: False
+    scale_min: 0.8
+    scale_max: 1.2
+    noise_std: 0.05
+    value_range: [-200.0, 200.0]
+    apply_probability: 0.4
+  wandb:
+    enabled: True
+    project: hair-map-dae
+    entity:
+    run_name:
+    mode: online
+  diagnostics:
+    enabled: True
+    heartbeat_interval_sec: 10
+    batch_log_every: 25
+    trace_batches_every: 0
+    enable_faulthandler: True
+  ddp:
+    find_unused_parameters: False
+    sync_batchnorm: False
+    broadcast_buffers: True
+
+arch:
+  enable_fuse_generator: False
+  num_expression: 50
+  num_shape: 300
+  enable_pre_render_culling: False
+  pre_render_head_scale: 0.96
+  rasterizer_strand_culling:
+    enabled: True
+    root_segments: 50
+    min_occluded_pixels: 1
+    min_occluded_fraction: 0.0
+  perm_scale: 100.0
+  perm_translation: [-1.03059, -0.630004, 3.36756]
+  perm_rotation_euler_deg: [0.0, 0.0, 0.0]
+  perm_head_mesh_path: /home/alrivero/HairSynthesis/assets/perm_head.obj
+  strand_basis_path: assets/blend-shapes/strands-blend-shapes.npz
+
+dae:
+  model:
+    # Packed map contract: [mask, dx, dy, depth_norm].
+    in_channels: 4
+    out_channels: 4
+    # One encoder stage per entry. With the default 512 target size, four stages mean
+    # 512 -> 256 -> 128 -> 64 -> 32 before the latent projection.
+    encoder_channels: [32, 64, 128, 256]
+    # Number of channels in the spatial latent tensor z_hair.
+    latent_channels: 128
+    # Residual blocks applied at the bottleneck after the latent projection.
+    bottleneck_blocks: 2
+
+  demo:
+    # Which split to draw the synthetic anchor batch from for the corruption demo script.
+    phase: val
+    # Number of samples shown in each saved demo image.
+    max_samples: 4
+    # Save one extra image using the normal weighted random corruption sampler.
+    include_weighted_mix: True
+    # Include families with weight 0.0 in the forced one-family-per-image demo.
+    include_disabled_families: True
+    # Optional explicit subset of families. Leave empty to use all configured families.
+    families: []
+    # Optional override. If null, the script writes under train.log_path/corruption_demo_<timestamp>.
+    output_dir:
+    # Seed for deterministic corruption demos.
+    seed: 1234
+
+  corruption:
+    # When training normally, each sample draws a random subset of corruption families.
+    min_ops_per_sample: 7
+    max_ops_per_sample: 10
+    support:
+      # Relative sampling weight in the random family draw.
+      weight: 0.25
+      # Support morphology branch: min/max odd kernel sizes for erosion or dilation.
+      kernel_min: 5
+      kernel_max: 11
+      # Support hole branch: maximum number of rectangular holes carved into the hair mask.
+      max_holes: 4
+      # Hole size as a fraction of image height and width.
+      hole_size_min: 0.05
+      hole_size_max: 0.16
+      # Boundary trim branch: fraction of the image width/height removed from one side.
+      trim_fraction_min: 0.08
+      trim_fraction_max: 0.22
+    strand_dropout:
+      # Pre-render corruption. A random subset of strands is kept, then the map is rerendered.
+      weight: 0.35
+      keep_ratio_min: 0.30
+      keep_ratio_max: 0.70
+    blur_resample:
+      # Downsample to this range, then upsample back to full resolution.
+      weight: 0.35
+      scale_min: 0.30
+      scale_max: 0.70
+    orientation_jitter:
+      # Smooth angular noise applied to the dx/dy field.
+      weight: 0.12
+      max_angle_deg: 30.0
+      # Controls the spatial smoothness of the angular perturbation field.
+      low_res: 32
+    orientation_sign_flip:
+      # Flips the sign of dx/dy together inside small local windows to break flow continuity.
+      weight: 0.25
+      # Maximum number of local sign-flip windows per sample.
+      max_regions: 6
+      # Window size as a fraction of image height and width.
+      size_min: 0.03
+      size_max: 0.10
+    orientation_confidence:
+      # Smooth attenuation of dx/dy magnitude, used to mimic weak strand orientation confidence.
+      weight: 0.12
+      low_res: 24
+      attenuation_min: 0.10
+      attenuation_max: 0.60
+    depth_holes:
+      # Local dropout applied only to the depth channel.
+      weight: 0.12
+      max_holes: 6
+      hole_size_min: 0.04
+      hole_size_max: 0.14
+    depth_drift:
+      # Smooth local additive bias field for normalized depth.
+      weight: 0.12
+      max_abs_bias: 0.20
+      low_res: 24
+    misregistration:
+      # Integer pixel translation applied to orientation and depth relative to the support mask.
+      weight: 0.08
+      max_shift_px: 12
+    partial_occlusion:
+      # Larger support-region removal. Enabled here with a higher weight so occlusions show up more often.
+      weight: 0.20
+      max_regions: 6
+      size_min: 0.10
+      size_max: 0.30
+    channel_inconsistency:
+      # Applies an orientation-only or depth-only corruption to break cross-channel agreement.
+      weight: 0.08
+    final_pose_jitter:
+      # Optional final-stage rigid jitter applied after the sampled corruption families.
+      # This is not part of the weighted family draw; it is a separate last-step transform.
+      enabled: False
+      # Probability of applying the final rigid jitter to a sample.
+      apply_probability: 1.0
+      # Slight in-plane image rotation applied to the corrupted packed map.
+      max_rotation_deg: 0.0
+      # Slight x/y translation in pixels applied to the corrupted packed map.
+      max_translation_px: 50.0
+
+checkpoint_smirk: pretrained_models/SMIRK_em1.pt
+
+perm:
+  scalp_bounds: [0.1870, 0.8018, 0.4011, 0.8047]
+
+dataset:
+  resolution: 512
+  FFHQ:
+    FFHQ_path: /data/add_disk3/arivero/images1024x1024/images
+    FFHQ_meta_path: /data/add_disk3/arivero/ffhq-dataset-v2.json
+    FFHQ_include_list: /data/add_disk3/arivero/images1024x1024/kept_names_mask_reports.txt
+    FFHQ_hairmask: /data/add_disk3/arivero/images1024x1024/masks/hair
+    FFHQ_bodymask: /data/add_disk3/arivero/images1024x1024/masks/body
+    FFHQ_facemask: /data/add_disk3/arivero/images1024x1024/masks/face
+    FFHQ_apply_person_mask_to_image: False
+    FFHQ_apply_body_mask_to_image: False
+    FFHQ_apply_face_hair_mask_to_image: True
+    FFHQ_apply_mask_to_image: none
+    FFHQ_percentage: 1
+    FFHQ_percentage_subset: 1
+    FFHQ_mediapipe_landmarks_path:
+  Hair20k:
+    blenshape_path: assets/blend-shapes/strands-blend-shapes.npz
+    Hair20k_path: /data/add_disk1/alrivero/neural-textures/high-res
+    load_roots: True
+    root_cache_enabled: True
+    root_scale: 2.5
+    root_cache_workers: 16
+    root_cache_knn_k: 8
+    root_cache_force_rebuild: False

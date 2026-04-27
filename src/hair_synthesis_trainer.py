@@ -1,6 +1,7 @@
 import os
 import warnings
 from contextlib import nullcontext
+from difflib import get_close_matches
 
 import cv2
 import numpy as np
@@ -33,22 +34,7 @@ class HairSynthesisTrainer(BaseHairTrainer):
         self._warned_cycle_target_fallback = False
         resume_path = getattr(self.config, 'resume', None)
         self.initialize_from_resume = bool(resume_path)
-        step2_sparse_cfg = getattr(self.config.train, 'step2_sparse_color', None)
         step2_face_cleanup_cfg = getattr(self.config.train, 'step2_face_cleanup', None)
-        self.step2_use_hair_mask_union = bool(
-            getattr(
-                step2_sparse_cfg,
-                'use_hair_mask_union',
-                getattr(self.config.train, 'step2_use_hair_mask_union', False),
-            )
-        )
-        self.step2_fill_inverse_intersection_samples = bool(
-            getattr(
-                step2_sparse_cfg,
-                'fill_inverse_intersection_samples',
-                getattr(self.config.train, 'step2_fill_inverse_intersection_samples', False),
-            )
-        )
         self.step2_face_cleanup_enabled = bool(
             getattr(
                 step2_face_cleanup_cfg,
@@ -165,6 +151,10 @@ class HairSynthesisTrainer(BaseHairTrainer):
                 'workers': getattr(hair20k_cfg, 'root_cache_workers', 16),
                 'knn_k': getattr(hair20k_cfg, 'root_cache_knn_k', 8),
                 'force_rebuild': getattr(hair20k_cfg, 'root_cache_force_rebuild', False),
+                'lazy_init': getattr(hair20k_cfg, 'root_cache_lazy_init', None),
+                'lock_timeout_sec': getattr(hair20k_cfg, 'root_cache_lock_timeout_sec', None),
+                'lock_poll_sec': getattr(hair20k_cfg, 'root_cache_lock_poll_sec', None),
+                'stale_lock_sec': getattr(hair20k_cfg, 'root_cache_stale_lock_sec', None),
             }
 
         strand_basis_path = blendshape_override or getattr(self.config.arch, 'strand_basis_path', 'assets/blend-shapes/strands-blend-shapes.npz')
@@ -238,33 +228,12 @@ class HairSynthesisTrainer(BaseHairTrainer):
         self.debug_break_step2 = bool(getattr(debug_cfg, 'break_step2', getattr(self.config.train, 'debug_break_step2', False)))
         self.force_closed_mouth = bool(getattr(self.config.train, 'force_closed_mouth', False))
         self.zero_flame_expression = bool(getattr(self.config.train, 'zero_flame_expression', False))
-        self.step2_sparse_color_tangent_radius = float(
-            getattr(
-                step2_sparse_cfg,
-                'tangent_radius',
-                getattr(self.config.train, 'step2_sparse_color_tangent_radius', 18.0),
-            )
+        legacy_mask_ratio = float(getattr(self.config.train, 'mask_ratio', 0.01))
+        self.smirk_generator_mask_ratio = float(
+            getattr(self.config.train, 'smirk_generator_mask_ratio', legacy_mask_ratio)
         )
-        self.step2_sparse_color_normal_radius = float(
-            getattr(
-                step2_sparse_cfg,
-                'normal_radius',
-                getattr(self.config.train, 'step2_sparse_color_normal_radius', 6.0),
-            )
-        )
-        self.step2_sparse_color_fallback_radius = float(
-            getattr(
-                step2_sparse_cfg,
-                'fallback_radius',
-                getattr(self.config.train, 'step2_sparse_color_fallback_radius', 24.0),
-            )
-        )
-        self.step2_sparse_color_candidate_pool = int(
-            getattr(
-                step2_sparse_cfg,
-                'candidate_pool',
-                getattr(self.config.train, 'step2_sparse_color_candidate_pool', 8),
-            )
+        self.hair_generator_mask_ratio = float(
+            getattr(self.config.train, 'hair_generator_mask_ratio', legacy_mask_ratio)
         )
 
         self.setup_losses()
@@ -349,30 +318,68 @@ class HairSynthesisTrainer(BaseHairTrainer):
 
     def _load_smirk_generator_weights(self, checkpoint_path):
         self._load_smirk_generator_module_weights(
-            self.smirk_generator,
+            self._smirk_generator_module(),
             checkpoint_path,
             module_label='smirk generator',
         )
+
+    @staticmethod
+    def _normalize_checkpoint_key(key):
+        key = key.replace('hair_encoder.module.', 'hair_encoder.', 1)
+        key = key.replace('smirk_face_encoder.module.', 'smirk_face_encoder.', 1)
+        key = key.replace('smirk_generator.module.', 'smirk_generator.', 1)
+        return key
 
     def load_model(self, resume, load_fuse_generator=True, load_encoder=True, device='cuda'):
         loaded_state_dict = torch.load(resume, map_location=device)
 
         print(f'Loading checkpoint from {resume}, load_encoder={load_encoder}, load_fuse_generator={load_fuse_generator}')
 
-        filtered_state_dict = {}
-        for key, value in loaded_state_dict.items():
-            if load_encoder and (key.startswith('hair_encoder') or key.startswith('smirk_face_encoder')):
-                filtered_state_dict[key] = value
-            if load_fuse_generator and key.startswith('smirk_generator'):
-                filtered_state_dict[key] = value
+        normalized_state_dict = {
+            self._normalize_checkpoint_key(key): value
+            for key, value in loaded_state_dict.items()
+        }
 
-        self.load_state_dict(filtered_state_dict, strict=False)
+        if load_encoder:
+            hair_encoder_state = {}
+            smirk_face_encoder_state = {}
+            for key, value in normalized_state_dict.items():
+                if key.startswith('hair_encoder.'):
+                    hair_encoder_state[key.replace('hair_encoder.', '', 1)] = value
+                elif key.startswith('smirk_face_encoder.'):
+                    smirk_face_encoder_state[key.replace('smirk_face_encoder.', '', 1)] = value
+                elif key.startswith('smirk_encoder.'):
+                    smirk_face_encoder_state[key.replace('smirk_encoder.', '', 1)] = value
+
+            if hair_encoder_state:
+                self._hair_encoder_module().load_state_dict(hair_encoder_state, strict=False)
+            if smirk_face_encoder_state:
+                self.smirk_face_encoder.load_state_dict(smirk_face_encoder_state, strict=False)
+
+        if load_fuse_generator:
+            generator_state = {
+                key.replace('smirk_generator.', '', 1): value
+                for key, value in normalized_state_dict.items()
+                if key.startswith('smirk_generator.')
+            }
+            if generator_state and self._smirk_generator_module() is not None:
+                self._smirk_generator_module().load_state_dict(generator_state, strict=False)
 
     def save_model(self, state_dict, save_path):
         new_state_dict = {}
-        for key, value in state_dict.items():
-            if key.startswith('hair_encoder') or key.startswith('smirk_face_encoder') or key.startswith('smirk_generator'):
-                new_state_dict[key] = value
+        new_state_dict.update({
+            f'hair_encoder.{key}': value
+            for key, value in self._hair_encoder_module().state_dict().items()
+        })
+        new_state_dict.update({
+            f'smirk_face_encoder.{key}': value
+            for key, value in self.smirk_face_encoder.state_dict().items()
+        })
+        if self._smirk_generator_module() is not None:
+            new_state_dict.update({
+                f'smirk_generator.{key}': value
+                for key, value in self._smirk_generator_module().state_dict().items()
+            })
 
         torch.save(new_state_dict, save_path)
 
@@ -718,13 +725,13 @@ class HairSynthesisTrainer(BaseHairTrainer):
         )
 
         sparse_points = torch.zeros_like(img)
-        base_num_targets = int(self.config.train.mask_ratio * img.shape[-2] * img.shape[-1])
+        base_num_targets = int(self.smirk_generator_mask_ratio * img.shape[-2] * img.shape[-1])
         if base_num_targets > 0:
             sampled_points, _ = masking_utils.mesh_based_mask_uniform_faces(
                 transformed_vertices,
                 flame_faces=self.flame.faces_tensor,
                 face_probabilities=self.face_probabilities,
-                mask_ratio=self.config.train.mask_ratio,
+                mask_ratio=self.smirk_generator_mask_ratio,
                 IMAGE_SIZE=img.shape[-1],
             )
             for batch_idx in range(img.shape[0]):
@@ -965,12 +972,12 @@ class HairSynthesisTrainer(BaseHairTrainer):
             ):
                 masks = hairmask   # (B, 1, H, W)
 
-                # mask out hair and add random points inside the hair
-                tmask_ratio = self.config.train.mask_ratio # ratio of number of points to sample
-
-                # select pixel points from hair mask
-                hair_sampled_points = masking_utils.mask_uniform_hair(masks, tmask_ratio)   # (B, N, 2), N = number of points
-                extra_points = masking_utils.transfer_pixels(img, hair_sampled_points, hair_sampled_points)         # (B, 3, H, W) - mask in the original image which point will be used
+                # Mask out hair and keep sparse pixels sampled inside the ground-truth hair mask.
+                extra_points = self._sample_sparse_hair_pixels(
+                    img,
+                    masks,
+                    mask_ratio=self.smirk_generator_mask_ratio,
+                )
                 # extra_points = torch.zeros_like(img)  #debug
 
                 # completed masked img - mask out the hair and add the extra points
@@ -1456,9 +1463,32 @@ class HairSynthesisTrainer(BaseHairTrainer):
 
         return (source_mask * (1.0 - render_mask)).clamp(0.0, 1.0)
 
-    def _sample_nearest_valid_source_coords(self, valid_source_mask, target_xy):
-        """Map each target xy to nearby source pixels, weighted by source confidence."""
-        return self._sample_global_source_coords(valid_source_mask.float(), target_xy)
+    def _sample_sparse_hair_pixels(self, img, target_mask, *, mask_ratio, source_mask=None):
+        """Sample sparse target pixels like step 1 and optionally draw their colors from another hair mask."""
+        target_mask = target_mask.float().clamp(0.0, 1.0)
+        target_points = masking_utils.mask_uniform_hair(
+            target_mask,
+            mask_ratio,
+        )
+        if source_mask is None:
+            source_points = target_points
+        else:
+            source_mask = source_mask.float().clamp(0.0, 1.0)
+            source_points = masking_utils.mask_uniform_hair(
+                source_mask,
+                mask_ratio,
+            )
+
+        sparse_points = masking_utils.transfer_pixels(img, source_points, target_points)
+
+        if source_mask is not None:
+            target_mass = target_mask.flatten(1).sum(dim=1)
+            source_mass = source_mask.flatten(1).sum(dim=1)
+            invalid_batches = (target_mass <= 1e-8) | (source_mass <= 1e-8)
+            if invalid_batches.any():
+                sparse_points[invalid_batches] = 0.0
+
+        return sparse_points
 
     def _masked_cosine_angular_loss(self, predicted, target, mask, eps=1e-6):
         """Compare 2D orientation fields with a cosine-based angular loss."""
@@ -1614,6 +1644,27 @@ class HairSynthesisTrainer(BaseHairTrainer):
         self.current_epoch_idx = int(epoch_idx)
         self.in_warmup_phase = self.is_warmup_active(epoch_idx=epoch_idx)
 
+        freeze_policy = str(
+            self._cfg_get(self.config.train, 'second_path_freeze_policy', 'alternate')
+        ).strip().lower()
+        valid_policies = {'alternate', 'manual'}
+        if freeze_policy not in valid_policies:
+            suggestion = get_close_matches(freeze_policy, sorted(valid_policies), n=1)
+            suggestion_msg = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+            raise ValueError(
+                "train.second_path_freeze_policy must be 'alternate' or 'manual'; "
+                f"got {freeze_policy!r}.{suggestion_msg}"
+            )
+
+        if freeze_policy == 'manual':
+            self.config.train.freeze_encoder_in_second_path = bool(
+                self._cfg_get(self.config.train, 'freeze_encoder_in_second_path', False)
+            )
+            self.config.train.freeze_generator_in_second_path = bool(
+                self._cfg_get(self.config.train, 'freeze_generator_in_second_path', False)
+            )
+            return
+
         self.config.train.freeze_encoder_in_second_path = False
         self.config.train.freeze_generator_in_second_path = False
         if self.in_warmup_phase:
@@ -1718,58 +1769,7 @@ class HairSynthesisTrainer(BaseHairTrainer):
         loss = torch.abs(predicted - target) * valid_mask
         return loss.sum() / denom
 
-    def _sample_patch_candidates(self, candidate_scores, topk):
-        """Randomly choose one candidate from the top-k confidence-weighted patch samples."""
-        num_targets, num_candidates = candidate_scores.shape
-        if num_targets == 0 or num_candidates == 0:
-            device = candidate_scores.device
-            return (
-                torch.zeros((num_targets,), dtype=torch.long, device=device),
-                torch.zeros((num_targets,), dtype=torch.bool, device=device),
-            )
-
-        k = max(1, min(int(topk), num_candidates))
-        scores = candidate_scores.clamp_min(0.0)
-        top_vals, top_idx = torch.topk(scores, k=k, dim=1, largest=True)
-        found = top_vals.sum(dim=1) > 0
-
-        chosen = torch.zeros((num_targets,), dtype=torch.long, device=candidate_scores.device)
-        if found.any():
-            probs = top_vals[found] / top_vals[found].sum(dim=1, keepdim=True).clamp_min(1e-8)
-            rand_pos = torch.multinomial(probs, 1).squeeze(1)
-            chosen[found] = top_idx[found, rand_pos]
-        return chosen, found
-
-    def _sample_global_source_coords(self, source_weight, target_xy):
-        """Fallback to nearby source pixels, weighted by matte confidence and distance."""
-        source_weight = source_weight.float().clamp_min(0.0)
-        device = source_weight.device
-        num_targets = target_xy.shape[0]
-        if num_targets == 0:
-            return torch.zeros((0, 2), dtype=torch.long, device=device)
-
-        src_y, src_x = torch.nonzero(source_weight, as_tuple=True)
-        if src_x.numel() == 0:
-            return torch.zeros((num_targets, 2), dtype=torch.long, device=device)
-
-        src_xy = torch.stack([src_x, src_y], dim=1).float()
-        src_weight = source_weight[src_y, src_x].float()
-        max_source_candidates = 8192
-        if src_xy.shape[0] > max_source_candidates:
-            keep = torch.multinomial(src_weight, max_source_candidates, replacement=False)
-            src_xy = src_xy[keep]
-            src_weight = src_weight[keep]
-        delta = src_xy.unsqueeze(0) - target_xy.float().unsqueeze(1)
-        distance = (delta ** 2).sum(dim=-1)
-        scores = src_weight.unsqueeze(0) / (distance + 1.0)
-        topk = max(1, min(int(self.step2_sparse_color_candidate_pool), src_xy.shape[0]))
-        top_vals, top_idx = torch.topk(scores, k=topk, dim=1, largest=True)
-        probs = top_vals / top_vals.sum(dim=1, keepdim=True).clamp_min(1e-8)
-        rand_pos = torch.multinomial(probs, 1).squeeze(1)
-        chosen_src = top_idx[torch.arange(num_targets, device=device), rand_pos]
-        return src_xy[chosen_src].long()
-
-    def _build_sparse_hair_color_map(self, img, hair_mask, render_image, render_mask):
+    def _build_sparse_hair_color_map(self, img, hair_mask, _render_image, render_mask):
         """Create a masked image whose sparse hair hints live only inside the rendered hair silhouette."""
         render_size = render_mask.shape[-2:]
         if img.shape[-2:] != render_size:
@@ -1784,145 +1784,12 @@ class HairSynthesisTrainer(BaseHairTrainer):
 
         hair_mask = hair_mask.float().clamp(0.0, 1.0)
         render_mask = render_mask.float().clamp(0.0, 1.0)
-        inverse_intersection_mask = self._compute_inverse_intersection_mask(hair_mask, render_mask)
-        render_dxdy = render_image[:, 1:3]
-
-        batch_size, _, height, width = img.shape
-        sparse_points = torch.zeros_like(img)
-        base_num_targets = int(self.config.train.mask_ratio * height * width)
-        if base_num_targets <= 0:
-            return masking_utils.masking(
-                img,
-                1.0 - hair_mask,
-                sparse_points,
-                self.config.train.mask_dilation_radius,
-                rendered_mask=render_mask,
-                extra_noise=False,
-                random_mask=0.0,
-            )
-
-        tangent_radius = max(self.step2_sparse_color_tangent_radius, 1.0)
-        normal_radius = max(self.step2_sparse_color_normal_radius, 1.0)
-        fallback_radius = max(self.step2_sparse_color_fallback_radius, max(tangent_radius, normal_radius))
-        candidate_pool = max(1, self.step2_sparse_color_candidate_pool)
-
-        patch_radius = int(np.ceil(fallback_radius))
-        offsets = torch.arange(-patch_radius, patch_radius + 1, device=img.device)
-        off_y, off_x = torch.meshgrid(offsets, offsets, indexing='ij')
-        off_x = off_x.reshape(1, -1).float()
-        off_y = off_y.reshape(1, -1).float()
-        radial_distance = off_x.square() + off_y.square()
-
-        for batch_idx in range(batch_size):
-            source_weight = hair_mask[batch_idx, 0].clamp(0.0, 1.0)
-            render_weight = render_mask[batch_idx, 0].clamp(0.0, 1.0)
-            inverse_weight = inverse_intersection_mask[batch_idx, 0].clamp(0.0, 1.0)
-            if self.step2_use_hair_mask_union:
-                target_weight = torch.maximum(source_weight, render_weight)
-            else:
-                target_weight = render_weight
-
-            target_mass = target_weight.sum()
-            if float(target_mass.item()) <= 1e-8:
-                continue
-
-            target_flat = target_weight.reshape(-1)
-            target_idx = torch.multinomial(target_flat, base_num_targets, replacement=True)
-            target_y = target_idx // width
-            target_x = target_idx % width
-
-            inverse_probability = (
-                inverse_weight[target_y, target_x]
-                / target_weight[target_y, target_x].clamp_min(1e-8)
-            ).clamp(0.0, 1.0)
-            inverse_samples = torch.rand_like(inverse_probability) < inverse_probability
-
-            regular_rows = torch.where(~inverse_samples)[0]
-            if regular_rows.numel() > 0:
-                regular_target_x = target_x[regular_rows]
-                regular_target_y = target_y[regular_rows]
-
-                tangent = render_dxdy[batch_idx, :, regular_target_y, regular_target_x].permute(1, 0)
-                tangent_norm = torch.linalg.norm(tangent, dim=-1, keepdim=True)
-                tangent_dir = torch.zeros_like(tangent)
-                valid_tangent = tangent_norm.squeeze(-1) > 1e-6
-                tangent_dir[valid_tangent] = tangent[valid_tangent] / tangent_norm[valid_tangent]
-                tangent_dir[~valid_tangent, 0] = 1.0
-                normal_dir = torch.stack([-tangent_dir[:, 1], tangent_dir[:, 0]], dim=-1)
-
-                cand_x = regular_target_x.unsqueeze(1).float() + off_x
-                cand_y = regular_target_y.unsqueeze(1).float() + off_y
-                valid_patch = (cand_x >= 0) & (cand_x < width) & (cand_y >= 0) & (cand_y < height)
-                cand_x_clamped = cand_x.clamp(0, width - 1).long()
-                cand_y_clamped = cand_y.clamp(0, height - 1).long()
-
-                source_in_patch = source_weight[cand_y_clamped, cand_x_clamped] * valid_patch.float()
-                tangential_offset = off_x * tangent_dir[:, :1] + off_y * tangent_dir[:, 1:]
-                normal_offset = off_x * normal_dir[:, :1] + off_y * normal_dir[:, 1:]
-
-                oriented_distance = (
-                    (tangential_offset / tangent_radius) ** 2
-                    + (normal_offset / normal_radius) ** 2
-                )
-                oriented_scores = source_in_patch * torch.exp(-0.5 * oriented_distance)
-
-                selected_idx, found = self._sample_patch_candidates(
-                    oriented_scores,
-                    candidate_pool,
-                )
-
-                if (~found).any():
-                    missing_rows = torch.where(~found)[0]
-                    fallback_distance = radial_distance.expand(missing_rows.numel(), -1)
-                    fallback_scores = source_in_patch[missing_rows] * torch.exp(
-                        -0.5 * fallback_distance / (fallback_radius ** 2)
-                    )
-                    fallback_idx, fallback_found = self._sample_patch_candidates(
-                        fallback_scores,
-                        candidate_pool,
-                    )
-                    selected_idx[missing_rows[fallback_found]] = fallback_idx[fallback_found]
-                    found[missing_rows[fallback_found]] = True
-
-                selected_src_x = torch.zeros_like(regular_target_x)
-                selected_src_y = torch.zeros_like(regular_target_y)
-                if found.any():
-                    found_rows = torch.where(found)[0]
-                    chosen_cols = selected_idx[found]
-                    selected_src_x[found_rows] = cand_x_clamped[found_rows, chosen_cols]
-                    selected_src_y[found_rows] = cand_y_clamped[found_rows, chosen_cols]
-
-                if (~found).any():
-                    missing_rows = torch.where(~found)[0]
-                    fallback_xy = self._sample_global_source_coords(
-                        source_weight,
-                        torch.stack([regular_target_x[missing_rows], regular_target_y[missing_rows]], dim=1),
-                    )
-                    selected_src_x[missing_rows] = fallback_xy[:, 0]
-                    selected_src_y[missing_rows] = fallback_xy[:, 1]
-
-                sparse_points[batch_idx, :, regular_target_y, regular_target_x] = img[
-                    batch_idx,
-                    :,
-                    selected_src_y,
-                    selected_src_x,
-                ]
-
-            inverse_rows = torch.where(inverse_samples)[0]
-            if inverse_rows.numel() > 0 and self.step2_fill_inverse_intersection_samples:
-                inverse_target_x = target_x[inverse_rows]
-                inverse_target_y = target_y[inverse_rows]
-                valid_surround_mask = (1.0 - inverse_weight) * (1.0 - render_weight)
-                nearest_xy = self._sample_nearest_valid_source_coords(
-                    valid_surround_mask,
-                    torch.stack([inverse_target_x, inverse_target_y], dim=1),
-                )
-                sparse_points[batch_idx, :, inverse_target_y, inverse_target_x] = img[
-                    batch_idx,
-                    :,
-                    nearest_xy[:, 1],
-                    nearest_xy[:, 0],
-                ]
+        sparse_points = self._sample_sparse_hair_pixels(
+            img,
+            render_mask,
+            mask_ratio=self.hair_generator_mask_ratio,
+            source_mask=hair_mask,
+        )
 
         masks_rest = 1.0 - hair_mask
         return masking_utils.masking(
@@ -2086,9 +1953,11 @@ class HairSynthesisTrainer(BaseHairTrainer):
         else:
             strand_depth_output = strand_output
 
-        tmask_ratio = self.config.train.mask_ratio
-        hair_sampled_points = masking_utils.mask_uniform_hair(masks, tmask_ratio)
-        extra_points = masking_utils.transfer_pixels(img, hair_sampled_points, hair_sampled_points)
+        extra_points = self._sample_sparse_hair_pixels(
+            img,
+            masks,
+            mask_ratio=self.hair_generator_mask_ratio,
+        )
         masks_rest = 1 - masks
         masked_img = masking_utils.masking(img, masks_rest, extra_points, self.config.train.mask_dilation_radius)
 
@@ -2117,36 +1986,38 @@ class HairSynthesisTrainer(BaseHairTrainer):
         return bool(getattr(self.config.train, 'encoder_batchnorm_eval', False))
 
     def _set_encoder_batchnorm_eval(self):
-        for module in self.hair_encoder.modules():
+        for module in self._hair_encoder_module().modules():
             if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
                 module.eval()
 
     def freeze_encoder(self):
+        hair_encoder_module = self._hair_encoder_module()
         if self.encoder_mode == 'perm_latent':
-            utils.freeze_module(self.hair_encoder, 'perm latent encoder')
+            utils.freeze_module(hair_encoder_module, 'perm latent encoder')
             return
-        utils.freeze_module(self.hair_encoder.strand_encoder, 'strand encoder')
-        if self.config.arch.depth_branch and hasattr(self.hair_encoder, 'depth_encoder'):
-            utils.freeze_module(self.hair_encoder.depth_encoder, 'depth encoder')
+        utils.freeze_module(hair_encoder_module.strand_encoder, 'strand encoder')
+        if self.config.arch.depth_branch and hasattr(hair_encoder_module, 'depth_encoder'):
+            utils.freeze_module(hair_encoder_module.depth_encoder, 'depth encoder')
         
     def unfreeze_encoder(self):
+        hair_encoder_module = self._hair_encoder_module()
         optimize_strand = getattr(self.config.train, 'optimize_strand', None)
         if optimize_strand is None:
             optimize_strand = getattr(self.config.train, 'optimize_hairstrand', True)
         if self.encoder_mode == 'perm_latent':
             if optimize_strand:
-                utils.unfreeze_module(self.hair_encoder, 'perm latent encoder')
+                utils.unfreeze_module(hair_encoder_module, 'perm latent encoder')
             if self._encoder_batchnorm_eval_enabled():
                 self._set_encoder_batchnorm_eval()
             return
         if optimize_strand:
-            utils.unfreeze_module(self.hair_encoder.strand_encoder, 'strand encoder')
+            utils.unfreeze_module(hair_encoder_module.strand_encoder, 'strand encoder')
         
         optimize_depth = getattr(self.config.train, 'optimize_depth', None)
         if optimize_depth is None:
             optimize_depth = getattr(self.config.train, 'optimize_hairdepth', False)
-        if (self.config.arch.depth_branch and optimize_depth and hasattr(self.hair_encoder, 'depth_encoder')):
-            utils.unfreeze_module(self.hair_encoder.depth_encoder, 'depth encoder')
+        if (self.config.arch.depth_branch and optimize_depth and hasattr(hair_encoder_module, 'depth_encoder')):
+            utils.unfreeze_module(hair_encoder_module.depth_encoder, 'depth encoder')
 
         if self._encoder_batchnorm_eval_enabled():
             self._set_encoder_batchnorm_eval()
@@ -2222,7 +2093,7 @@ class HairSynthesisTrainer(BaseHairTrainer):
                         and not self._has_gradient_clipping_config()
                         and not self.config.train.freeze_generator_in_second_path
                     ):
-                        torch.nn.utils.clip_grad_norm_(self.smirk_generator.parameters(), 0.1)
+                        torch.nn.utils.clip_grad_norm_(self._smirk_generator_module().parameters(), 0.1)
 
                     self.optimizers_step(step_encoder=not self.config.train.freeze_encoder_in_second_path, 
                                          step_fuse_generator=not self.config.train.freeze_generator_in_second_path)

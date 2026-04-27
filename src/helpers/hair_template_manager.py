@@ -6,6 +6,7 @@ import hashlib
 import os
 import random
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -21,6 +22,9 @@ class HairTemplateManager:
     DEFAULT_ROOT_SCALE = 2.5
     DEFAULT_ROOT_CACHE_WORKERS = 16
     DEFAULT_ROOT_CACHE_K = 8
+    DEFAULT_ROOT_CACHE_LOCK_TIMEOUT_SEC = 600.0
+    DEFAULT_ROOT_CACHE_LOCK_POLL_SEC = 0.1
+    DEFAULT_ROOT_CACHE_STALE_LOCK_SEC = 1800.0
 
     def __init__(
         self,
@@ -66,6 +70,26 @@ class HairTemplateManager:
             int(self._cfg_get(root_cache_cfg, 'knn_k', self.DEFAULT_ROOT_CACHE_K)),
         )
         self.root_cache_force_rebuild = bool(self._cfg_get(root_cache_cfg, 'force_rebuild', False))
+        world_size_env = os.environ.get('WORLD_SIZE')
+        default_lazy_init = False
+        if world_size_env is not None:
+            try:
+                default_lazy_init = int(world_size_env) > 1
+            except ValueError:
+                default_lazy_init = False
+        self.root_cache_lazy_init = bool(self._cfg_get(root_cache_cfg, 'lazy_init', default_lazy_init))
+        self.root_cache_lock_timeout_sec = max(
+            1.0,
+            float(self._cfg_get(root_cache_cfg, 'lock_timeout_sec', self.DEFAULT_ROOT_CACHE_LOCK_TIMEOUT_SEC)),
+        )
+        self.root_cache_lock_poll_sec = max(
+            0.01,
+            float(self._cfg_get(root_cache_cfg, 'lock_poll_sec', self.DEFAULT_ROOT_CACHE_LOCK_POLL_SEC)),
+        )
+        self.root_cache_stale_lock_sec = max(
+            self.root_cache_lock_poll_sec,
+            float(self._cfg_get(root_cache_cfg, 'stale_lock_sec', self.DEFAULT_ROOT_CACHE_STALE_LOCK_SEC)),
+        )
         self.root_cache_dir = self._build_cache_dir() if self.root_cache_enabled else None
 
         self.latest_sample: Optional[Dict[str, object]] = None
@@ -201,9 +225,19 @@ class HairTemplateManager:
     def _load_roots_array(self, path: str, data: np.lib.npyio.NpzFile) -> Optional[np.ndarray]:
         if self.root_cache_enabled:
             cache_path = self._root_cache_map.get(path)
+            if cache_path is None:
+                cache_path = self._ensure_root_cache_entry(path)
             if cache_path:
-                with np.load(cache_path, allow_pickle=False) as cache_data:
-                    return np.asarray(cache_data['roots'], dtype=np.float32)
+                try:
+                    with np.load(cache_path, allow_pickle=False) as cache_data:
+                        return np.asarray(cache_data['roots'], dtype=np.float32)
+                except Exception as exc:
+                    print(f"[HairTemplateManager] Failed to load cached roots {cache_path}: {exc}")
+                    self._root_cache_map.pop(path, None)
+                    refreshed_cache_path = self._ensure_root_cache_entry(path)
+                    if refreshed_cache_path:
+                        with np.load(refreshed_cache_path, allow_pickle=False) as cache_data:
+                            return np.asarray(cache_data['roots'], dtype=np.float32)
 
         if 'roots' not in data:
             return None
@@ -250,6 +284,13 @@ class HairTemplateManager:
             return
 
         self.root_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.root_cache_lazy_init:
+            print(
+                f"[HairTemplateManager] Root cache lazy init enabled for {len(self.template_paths)} templates "
+                f"(scale={self.root_scale:.4f}, k={self.root_cache_knn_k})."
+            )
+            return
 
         pending: List[Tuple[str, Path]] = []
         ready_count = 0
@@ -605,6 +646,77 @@ class HairTemplateManager:
             raise ValueError("Root cache directory is not initialized.")
         return self.root_cache_dir / Path(template_path).name
 
+    def _lock_path_for_cache(self, cache_path: Path) -> Path:
+        return cache_path.with_suffix(f"{cache_path.suffix}.lock")
+
+    def _ensure_root_cache_entry(self, template_path: str) -> Optional[str]:
+        if not self.root_cache_enabled:
+            return None
+
+        cache_path = self._cache_path_for_template(template_path)
+        if not self.root_cache_force_rebuild and self._is_cache_valid(cache_path, template_path):
+            cache_path_str = str(cache_path)
+            self._root_cache_map[template_path] = cache_path_str
+            return cache_path_str
+
+        lock_path = self._lock_path_for_cache(cache_path)
+        if not self._acquire_cache_lock(lock_path):
+            if not self.root_cache_force_rebuild and self._is_cache_valid(cache_path, template_path):
+                cache_path_str = str(cache_path)
+                self._root_cache_map[template_path] = cache_path_str
+                return cache_path_str
+            return None
+
+        try:
+            if not self.root_cache_force_rebuild and self._is_cache_valid(cache_path, template_path):
+                cache_path_str = str(cache_path)
+                self._root_cache_map[template_path] = cache_path_str
+                return cache_path_str
+
+            ok, error = self._build_root_cache_entry(template_path, cache_path)
+            if not ok:
+                print(f"[HairTemplateManager] Root cache failed for {template_path}: {error}")
+                return None
+
+            cache_path_str = str(cache_path)
+            self._root_cache_map[template_path] = cache_path_str
+            return cache_path_str
+        finally:
+            self._release_cache_lock(lock_path)
+
+    def _acquire_cache_lock(self, lock_path: Path) -> bool:
+        deadline = time.monotonic() + self.root_cache_lock_timeout_sec
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                    handle.write(f"{os.getpid()}\n{time.time():.6f}\n")
+                return True
+            except FileExistsError:
+                if self._lock_is_stale(lock_path):
+                    try:
+                        os.remove(lock_path)
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    print(f"[HairTemplateManager] Timed out waiting for cache lock {lock_path}.")
+                    return False
+                time.sleep(self.root_cache_lock_poll_sec)
+
+    def _release_cache_lock(self, lock_path: Path) -> None:
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+
+    def _lock_is_stale(self, lock_path: Path) -> bool:
+        try:
+            age_sec = time.time() - lock_path.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        return age_sec >= self.root_cache_stale_lock_sec
+
     def _is_cache_valid(self, cache_path: Path, template_path: str) -> bool:
         if not cache_path.exists():
             return False
@@ -689,5 +801,9 @@ class HairTemplateManager:
         if cfg is None:
             return default
         if isinstance(cfg, dict):
-            return cfg.get(key, default)
-        return getattr(cfg, key, default)
+            value = cfg.get(key, default)
+        else:
+            value = getattr(cfg, key, default)
+        if value is None:
+            return default
+        return value

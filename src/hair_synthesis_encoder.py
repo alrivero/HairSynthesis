@@ -114,27 +114,7 @@ class HairSynthesisEncoder(nn.Module):
 
         if self.config.arch.depth_branch:
             depth_pred = self.depth_encoder(img)
-
-            abs_max_nonnan = torch.abs(
-                torch_nanminmax(depth_pred, 'max', dim=(1, 2, 3), keepdim=True)
-            )
-            abs_min_nonnan = torch.abs(
-                torch_nanminmax(depth_pred, 'min', dim=(1, 2, 3), keepdim=True)
-            )
-
-            depth_pred_masked = depth_pred * hair_mask - (
-                1 - hair_mask
-            ) * (abs_max_nonnan + abs_min_nonnan)
-            max_val = torch_nanminmax(depth_pred_masked, 'max', dim=(1, 2, 3), keepdim=True)
-            min_val = torch_nanminmax(
-                depth_pred_masked + 2 * (1 - hair_mask) * (abs_max_nonnan + abs_min_nonnan),
-                'min',
-                dim=(1, 2, 3),
-                keepdim=True,
-            )
-
-            depth_pred_norm = (depth_pred_masked - min_val) / (max_val - min_val) * hair_mask
-            depth_pred_norm = depth_pred_norm.clamp(0.0, 1.0)
+            depth_pred_norm = self._normalize_depth_prediction(depth_pred, hair_mask)
 
             return {
                 'strand_params': strand_pred,
@@ -218,3 +198,30 @@ class HairSynthesisEncoder(nn.Module):
             f"Unsupported PERM latent composition shapes: residual={tuple(residual.shape)}, "
             f"base={tuple(base.shape)}."
         )
+
+    def _normalize_depth_prediction(self, depth_pred, hair_mask, eps=1e-8):
+        """Normalize depth over the valid hair support and avoid NaNs on empty or flat masks."""
+        hair_mask = hair_mask.float().clamp(0.0, 1.0)
+        valid_hair = hair_mask > 1e-6
+        depth_on_hair = torch.where(
+            valid_hair,
+            depth_pred,
+            torch.full_like(depth_pred, float('nan')),
+        )
+
+        max_val = torch_nanminmax(depth_on_hair, 'max', dim=(1, 2, 3), keepdim=True)
+        min_val = torch_nanminmax(depth_on_hair, 'min', dim=(1, 2, 3), keepdim=True)
+        depth_range = max_val - min_val
+
+        has_valid_range = (
+            torch.isfinite(min_val)
+            & torch.isfinite(max_val)
+            & torch.isfinite(depth_range)
+            & (depth_range > eps)
+        )
+
+        safe_min = torch.where(has_valid_range, min_val, torch.zeros_like(min_val))
+        safe_range = torch.where(has_valid_range, depth_range, torch.ones_like(depth_range))
+        normalized = (depth_pred - safe_min) / safe_range
+        normalized = torch.where(has_valid_range, normalized, torch.zeros_like(normalized))
+        return normalized.mul(hair_mask).clamp(0.0, 1.0)

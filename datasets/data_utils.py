@@ -1,5 +1,6 @@
 from datasets.hisa_dataset import get_datasets_HiSA
 import torch
+from torch.utils.data.distributed import DistributedSampler
 from datasets.lrs3_dataset import get_datasets_LRS3
 from datasets.mead_dataset import get_datasets_MEAD
 from datasets.mead_sides_dataset import get_datasets_MEAD_sides
@@ -10,7 +11,8 @@ import os
 from datasets.config_utils import get_dataset_section
 
 
-def load_dataloaders(config, split_file=None, test_only=False):
+def load_dataloaders(config, split_file=None, test_only=False, distributed=False, rank=0, world_size=1):
+    is_main_process = (not distributed) or int(rank) == 0
     # ----------------------- initialize datasets ----------------------- #
     # train_dataset_LRS3, val_dataset_LRS3, test_dataset_LRS3 = get_datasets_LRS3(config)
     # train_dataset_MEAD, val_dataset_MEAD, test_dataset_MEAD = get_datasets_MEAD(config)
@@ -53,6 +55,8 @@ def load_dataloaders(config, split_file=None, test_only=False):
     def collate_fn(batch):
         # filter none
         batch = [b for b in batch if b is not None]
+        if not batch:
+            return None
         return torch.utils.data.dataloader.default_collate(batch)
         
     
@@ -63,15 +67,52 @@ def load_dataloaders(config, split_file=None, test_only=False):
         test_dataset = torch.utils.data.ConcatDataset([test_dataset_ffhq])
 
         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=False, collate_fn=collate_fn)
-        print("test_loader", len(test_loader))
+        if is_main_process:
+            print("test_loader", len(test_loader))
+
+    train_sampler = None
+    val_sampler = None
+    if distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            drop_last=False,
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
 
     # train_loader = torch.utils.data.DataLoader(train_dataset, batch_sampler=sampler, num_workers=config.train.num_workers, collate_fn=collate_fn)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config.train.batch_size, shuffle=True, num_workers=config.train.num_workers, drop_last=False, collate_fn=collate_fn)  # TODO: change back to MixedDatasetBatchSampler, currently crash at epoch 4 so use this, but will need MixedDatasetBatchSampler for training on all datasets
-    print("train_dataset", len(train_dataset))
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config.train.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=config.train.num_workers,
+        drop_last=False,
+        collate_fn=collate_fn,
+    )  # TODO: change back to MixedDatasetBatchSampler, currently crash at epoch 4 so use this, but will need MixedDatasetBatchSampler for training on all datasets
+    if is_main_process:
+        print("train_dataset", len(train_dataset))
     
     # val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=True, collate_fn=collate_fn)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config.train.batch_size, num_workers=config.train.num_workers, shuffle=False, drop_last=False, collate_fn=collate_fn)
-    print("val_loader", len(val_loader))
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=config.train.batch_size,
+        num_workers=config.train.num_workers,
+        shuffle=False,
+        sampler=val_sampler,
+        drop_last=False,
+        collate_fn=collate_fn,
+    )
+    if is_main_process:
+        print("val_loader", len(val_loader))
 
     if test_only:
         return test_loader

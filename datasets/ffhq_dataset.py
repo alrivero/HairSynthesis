@@ -1,4 +1,5 @@
 import os
+import os.path as osp
 import numpy as np
 from datasets.base_dataset import BaseHairDataset
 import cv2
@@ -115,51 +116,17 @@ class FFHQDataset(BaseHairDataset):
 
 def get_datasets_FFHQ(config, split_file=None):
     from sklearn.model_selection import train_test_split
-    import os.path as osp
     ffhq_cfg = get_dataset_section(config, 'FFHQ')
     include_names = _load_include_names(_get_optional_path(ffhq_cfg, 'FFHQ_include_list'))
-    
-    if split_file is None:
-        # Read train and validation list
-        # {'training': <list of train images>, 'validation': <list of val images>}
-        with open(ffhq_cfg.FFHQ_meta_path, 'r') as f:
-            meta = json.load(f)
-        categories = defaultdict(list)
-        for v in meta.values():
-            category = v['category']
-            file_path = v['image']['file_path'].split('/')[-1]
-
-            categories[category].append(file_path)
-        categories = dict(categories)
-        categories = {
-            category: _filter_include_names(files, include_names)
-            for category, files in categories.items()
-        }
-
-        train_idx, val_idx = train_test_split(categories['training'], test_size=0.2, random_state=42)
-        test_idx = categories['validation']
-
-        if ffhq_cfg.FFHQ_percentage_subset != 1:
-            subset_perc = ffhq_cfg.FFHQ_percentage_subset
-            train_idx = train_idx[:int(len(train_idx)*subset_perc)]
-            val_idx = val_idx[:int(len(val_idx)*subset_perc)]
-            test_idx = test_idx[:int(len(test_idx)*subset_perc)]
-
-        split_dir = Path(config.train.log_path)
-        final_splits = {'training': train_idx, 'validation': val_idx, 'test': test_idx}
-        split_json = split_dir/'splits.json'
-        assert not split_json.exists(), f"{split_json} existed"
-        with open(split_json, 'w') as f:
-            json.dump(final_splits, f, indent=4)
-    else:
-        with open(split_file, 'r') as f:
-            final_splits = json.load(f)
-        train_idx = final_splits['training']
-        val_idx = final_splits['validation']
-        test_idx = final_splits['test']
-        train_idx = _filter_include_names(train_idx, include_names)
-        val_idx = _filter_include_names(val_idx, include_names)
-        test_idx = _filter_include_names(test_idx, include_names)
+    split_data = _load_or_create_split_manifest(
+        config=config,
+        split_file=split_file,
+        include_names=include_names,
+        train_test_split=train_test_split,
+    )
+    train_idx = split_data['training']
+    val_idx = split_data['validation']
+    test_idx = split_data['test']
 
     train_list = [
         [osp.join(ffhq_cfg.FFHQ_path, i),
@@ -182,6 +149,151 @@ def get_datasets_FFHQ(config, split_file=None):
         
     dataset = FFHQDataset(train_list, config), FFHQDataset(val_list, config, test=True), FFHQDataset(test_list, config, test=True)
     return dataset
+
+
+def ensure_ffhq_split_manifest(config, split_file=None):
+    ffhq_cfg = get_dataset_section(config, 'FFHQ')
+    include_names = _load_include_names(_get_optional_path(ffhq_cfg, 'FFHQ_include_list'))
+    manifest_path = _resolve_split_manifest_path(config, split_file)
+
+    if manifest_path.exists():
+        return str(manifest_path)
+
+    from sklearn.model_selection import train_test_split
+
+    _load_or_create_split_manifest(
+        config=config,
+        split_file=str(manifest_path),
+        include_names=include_names,
+        train_test_split=train_test_split,
+    )
+    return str(manifest_path)
+
+
+def _resolve_split_manifest_path(config, split_file=None):
+    if split_file is not None:
+        return Path(split_file)
+    return Path(config.train.log_path) / 'splits.json'
+
+
+def _load_or_create_split_manifest(config, split_file, include_names, train_test_split):
+    manifest_path = _resolve_split_manifest_path(config, split_file)
+    if manifest_path.exists():
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+        return _normalize_split_manifest(manifest)
+
+    manifest = _build_split_manifest(
+        config=config,
+        include_names=include_names,
+        train_test_split=train_test_split,
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(manifest_path, 'w') as f:
+        json.dump(manifest, f, indent=4)
+    return _normalize_split_manifest(manifest)
+
+
+def _build_split_manifest(config, include_names, train_test_split):
+    ffhq_cfg = get_dataset_section(config, 'FFHQ')
+    split_seed = 42
+
+    with open(ffhq_cfg.FFHQ_meta_path, 'r') as f:
+        meta = json.load(f)
+
+    categories = defaultdict(list)
+    for value in meta.values():
+        category = value['category']
+        file_path = value['image']['file_path'].split('/')[-1]
+        categories[category].append(file_path)
+    categories = dict(categories)
+    categories = {
+        category: _filter_include_names(files, include_names)
+        for category, files in categories.items()
+    }
+
+    train_idx, val_idx = train_test_split(
+        categories['training'],
+        test_size=0.2,
+        random_state=split_seed,
+    )
+    test_idx = categories['validation']
+
+    subset_fraction = float(ffhq_cfg.FFHQ_percentage_subset)
+    if subset_fraction != 1.0:
+        train_idx = train_idx[:int(len(train_idx) * subset_fraction)]
+        val_idx = val_idx[:int(len(val_idx) * subset_fraction)]
+        test_idx = test_idx[:int(len(test_idx) * subset_fraction)]
+
+    split_names = {
+        'training': sorted(train_idx),
+        'validation': sorted(val_idx),
+        'test': sorted(test_idx),
+    }
+
+    return {
+        'format_version': 2,
+        'dataset': 'FFHQ',
+        'seed': split_seed,
+        'counts': {name: len(entries) for name, entries in split_names.items()},
+        'source': {
+            'ffhq_meta_path': ffhq_cfg.FFHQ_meta_path,
+            'include_list_path': _get_optional_path(ffhq_cfg, 'FFHQ_include_list'),
+            'percentage_subset': subset_fraction,
+            'ffhq_path': ffhq_cfg.FFHQ_path,
+            'hairmask_path': ffhq_cfg.FFHQ_hairmask,
+            'bodymask_path': ffhq_cfg.FFHQ_bodymask,
+        },
+        'training': split_names['training'],
+        'validation': split_names['validation'],
+        'test': split_names['test'],
+        'records': {
+            split_name: _build_split_records(entries, ffhq_cfg)
+            for split_name, entries in split_names.items()
+        },
+    }
+
+
+def _build_split_records(entries, ffhq_cfg):
+    return [
+        {
+            'file_name': file_name,
+            'image_path': osp.join(ffhq_cfg.FFHQ_path, file_name),
+            'hairmask_path': osp.join(ffhq_cfg.FFHQ_hairmask, file_name),
+            'bodymask_path': osp.join(ffhq_cfg.FFHQ_bodymask, file_name),
+        }
+        for file_name in entries
+    ]
+
+
+def _normalize_split_manifest(manifest):
+    if isinstance(manifest, dict):
+        training = _extract_split_entries(manifest, 'training')
+        validation = _extract_split_entries(manifest, 'validation')
+        test = _extract_split_entries(manifest, 'test')
+        if training is not None and validation is not None and test is not None:
+            return {
+                'training': training,
+                'validation': validation,
+                'test': test,
+            }
+    raise ValueError("Split manifest must contain training/validation/test entries.")
+
+
+def _extract_split_entries(manifest, split_name):
+    entries = manifest.get(split_name)
+    if isinstance(entries, list):
+        if not entries:
+            return []
+        if isinstance(entries[0], dict):
+            return [entry['file_name'] for entry in entries]
+        return list(entries)
+
+    records = manifest.get('records', {}).get(split_name)
+    if isinstance(records, list):
+        return [entry['file_name'] for entry in records]
+
+    return None
 
 
 def _get_optional_path(cfg, key):

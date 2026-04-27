@@ -276,9 +276,10 @@ class BaseHairTrainer(BaseTrainer):
     def __init__(self, config):
         super().__init__(config)
         self.config = config
+        self.logger = None
 
         # Setup logger to save training loss to a file
-        if config.train.log_path is not None:
+        if config.train.log_path is not None and self._is_main_process():
             log_file = os.path.join(config.train.log_path, 'logs.log')
             assert not os.path.exists(log_file), f"{os.path.join(log_file)} existed!"
 
@@ -289,9 +290,35 @@ class BaseHairTrainer(BaseTrainer):
             fh.setLevel(logging.INFO)
             self.logger.addHandler(fh)
 
+    def _rank(self):
+        try:
+            return int(os.environ.get('RANK', '0'))
+        except ValueError:
+            return 0
+
+    def _is_main_process(self):
+        return self._rank() == 0
+
+    @staticmethod
+    def _unwrap_ddp_module(module):
+        return module.module if hasattr(module, 'module') else module
+
+    def _hair_encoder_module(self):
+        return self._unwrap_ddp_module(self.hair_encoder)
+
+    def _smirk_generator_module(self):
+        generator = getattr(self, 'smirk_generator', None)
+        if generator is None:
+            return None
+        return self._unwrap_ddp_module(generator)
+
     def logging(self, batch_idx, losses, phase):
         # ---------------- logging ---------------- #
-        if self.config.train.log_losses_every > 0 and batch_idx % self.config.train.log_losses_every == 0:
+        if (
+            self._is_main_process()
+            and self.config.train.log_losses_every > 0
+            and batch_idx % self.config.train.log_losses_every == 0
+        ):
             # print losses in one line
             loss_str = ''
             for k, v in losses.items():
@@ -299,6 +326,8 @@ class BaseHairTrainer(BaseTrainer):
             print(loss_str)
 
     def logging_epoch(self, epoch_idx, losses, phase):
+        if self.logger is None:
+            return
         # Save to log file
         loss_str = f'Epoch {epoch_idx+1}/{self.config.train.num_epochs}. {phase.upper()}. '
         for k, v in losses.items():
@@ -331,6 +360,8 @@ class BaseHairTrainer(BaseTrainer):
         plt.close()
 
     def plot_losses(self, losses_hist, plot_batch=True):
+        if not self._is_main_process():
+            return
         train_losses = losses_hist['train']
         val_losses = losses_hist['val']
         # print("plot_losses", train_losses)
@@ -537,12 +568,14 @@ class BaseHairTrainer(BaseTrainer):
         self.current_epoch_idx = epoch_idx
         self._lr_step_idx = 0
         generator_lr = self._target_lr('generator')
+        hair_encoder_module = self._hair_encoder_module()
+        smirk_generator_module = self._smirk_generator_module()
 
         if self.config.arch.enable_fuse_generator:
             if hasattr(self, 'smirk_generator_optimizer'):
                 self._set_optimizer_lr(self.smirk_generator_optimizer, generator_lr)
             else:
-                self.smirk_generator_optimizer = torch.optim.Adam(self.smirk_generator.parameters(), lr=generator_lr, betas=(0.5, 0.999))
+                self.smirk_generator_optimizer = torch.optim.Adam(smirk_generator_module.parameters(), lr=generator_lr, betas=(0.5, 0.999))
             self.smirk_generator_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.smirk_generator_optimizer,
                 T_max=self.n_steps,
@@ -562,12 +595,12 @@ class BaseHairTrainer(BaseTrainer):
                 optimize_strand = getattr(self.config.train, 'optimize_hairstrand', True)
             if optimize_strand:
                 if encoder_mode == 'perm_latent':
-                    params += list(self.hair_encoder.parameters())
+                    params += list(hair_encoder_module.parameters())
                 else:
-                    params += list(self.hair_encoder.strand_encoder.parameters())
+                    params += list(hair_encoder_module.strand_encoder.parameters())
             if encoder_mode != 'perm_latent' and self.config.arch.depth_branch:
                 if self.config.train.optimize_hairdepth:
-                    params += list(self.hair_encoder.depth_encoder.parameters())
+                    params += list(hair_encoder_module.depth_encoder.parameters())
 
             self.encoder_optimizer = torch.optim.Adam(params, lr=encoder_lr)
         
@@ -888,7 +921,7 @@ class BaseHairTrainer(BaseTrainer):
         torch.save(new_state_dict, save_path)
 
     def create_base_encoder(self):
-        self.base_encoder = copy.deepcopy(self.hair_encoder)
+        self.base_encoder = copy.deepcopy(self._hair_encoder_module())
         self.base_encoder.eval()
         for p in self.base_encoder.parameters():
             p.requires_grad = False
